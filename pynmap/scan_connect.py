@@ -40,6 +40,7 @@ from .engine import (
     Probe,
     ScanOptions,
     max_sockets_allowed,
+    select_timeout,
 )
 from .targets import Target
 from .timing import ScanPerformanceVars, UltraTimingVals
@@ -185,7 +186,16 @@ class ConnectScanner:
                 host.ports_todo.appendleft(port)
                 self.max_sockets = max(8, len(self._pending))
                 return
-            raise
+            # Cokolwiek innego dotyczy całego hosta, nie jednego portu:
+            # typowy przypadek to EAFNOSUPPORT na maszynie z wyłączonym
+            # IPv6 (a getaddrinfo zwraca wtedy adresy AAAA, więc wystarczy
+            # podać nazwę DNS). Wcześniej leciał tu goły traceback
+            # i ginął cały skan, także pozostałych celów.
+            host.ports_todo.appendleft(port)
+            self._skip_host(
+                host, f"socket({self._family_name(family)}): {exc.strerror or exc}"
+            )
+            return
 
         sock.setblocking(False)
         self._configure_socket(sock, host)
@@ -264,8 +274,10 @@ class ConnectScanner:
         timeout = self._select_timeout(hosts)
 
         if not self._pending:
+            # Nic nie jest zarejestrowane w selektorze, więc select() nie
+            # uśpiłby nas ani na chwilę — a czekać trzeba (--scan-delay).
             if timeout > 0:
-                time.sleep(min(timeout, 0.05))
+                time.sleep(timeout)
             return
 
         events = self._selector.select(timeout)
@@ -299,18 +311,8 @@ class ConnectScanner:
             sock.close()
 
     def _select_timeout(self, hosts: list[HostScanStats]) -> float:
-        """Do najbliższego wygaśnięcia sondy, ale nie dłużej niż 100 ms."""
-        now = time.monotonic()
-        soonest = None
-        for host in hosts:
-            for probe in host.outstanding.values():
-                if soonest is None or probe.timeout_at < soonest:
-                    soonest = probe.timeout_at
-
-        if soonest is None:
-            return 0.0 if any(h.work_left() for h in hosts) else 0.01
-
-        return max(0.0, min(soonest - now, 0.1))
+        """Do najbliższego wygaśnięcia sondy albo końca --scan-delay."""
+        return select_timeout(hosts, time.monotonic())
 
     # -- porządki -----------------------------------------------------------
 
@@ -337,6 +339,19 @@ class ConnectScanner:
             pass
         probe.sock = None
 
+    @staticmethod
+    def _family_name(family: int) -> str:
+        return {socket.AF_INET: "AF_INET", socket.AF_INET6: "AF_INET6"}.get(
+            family, str(family)
+        )
+
+    def _skip_host(self, host: HostScanStats, reason: str) -> None:
+        """Host nie da się przeskanować — zapisujemy powód i zamykamy go."""
+        for probe in list(host.outstanding.values()):
+            self._close_probe_socket(probe)
+        host.abandon_outstanding()
+        host.skip_reason = reason
+
     def _abandon_host(self, host: HostScanStats) -> None:
         for probe in list(host.outstanding.values()):
             self._close_probe_socket(probe)
@@ -346,7 +361,8 @@ class ConnectScanner:
     def _finish_host(self, host: HostScanStats) -> None:
         for probe in list(host.outstanding.values()):
             self._close_probe_socket(probe)
-        host.finalize()
+        if host.skip_reason is None:
+            host.finalize()
 
     def _cleanup(self) -> None:
         for _host, probe in list(self._pending.values()):
@@ -366,6 +382,8 @@ class ConnectScanner:
             probes_sent=host.probes_sent,
             replies_received=host.replies_received,
             timed_out=host.timed_out,
+            host_up=host.skip_reason is None,
+            skip_reason=host.skip_reason,
         )
 
 

@@ -177,3 +177,116 @@ def test_json_handles_skipped_host(services):
     data = json.loads(format_json(rep, services))
     assert data["hosts"][0]["up"] is False
     assert data["hosts"][0]["ports"] == []
+
+
+# ---------------------------------------------------------------------------
+# Zwijanie stanów ("ignored states") — odpowiednik printportoutput()
+# ---------------------------------------------------------------------------
+
+
+def _report_with(n_closed: int, open_ports=(), state=PortState.CLOSED):
+    pl = PortList()
+    for port in range(1, n_closed + 1):
+        pl.set_state(port, state, Reason.CONREFUSED)
+    for port in open_ports:
+        pl.set_state(port, PortState.OPEN, Reason.SYNACK)
+    scanned = list(range(1, n_closed + 1)) + list(open_ports)
+    host = HostReport(
+        target=Target(ip="192.0.2.10"),
+        portlist=pl,
+        scanned_ports=scanned,
+        elapsed_s=0.1,
+        probes_sent=len(scanned),
+        replies_received=len(scanned),
+    )
+    return ScanReport(scan_type=ScanType.CONNECT, hosts=[host], started_at=0.0)
+
+
+def test_split_results_keeps_everything_below_threshold(services):
+    rep = _report_with(10)
+    text = format_normal(rep, services)
+    assert "Not shown:" not in text
+    assert "10/tcp" in text
+
+
+def test_split_results_collapses_above_threshold(services):
+    rep = _report_with(200, open_ports=(8080,))
+    text = format_normal(rep, services)
+    assert "Not shown: 200 closed tcp ports (conn-refused)" in text
+    assert "8080/tcp" in text
+    # zwinięte porty nie mają własnych wierszy
+    assert "199/tcp" not in text
+
+
+def test_all_ports_ignored_uses_nmap_wording(services):
+    rep = _report_with(200)
+    text = format_normal(rep, services)
+    assert "All 200 scanned ports on 192.0.2.10 are in ignored states." in text
+    assert "Not shown: 200 closed tcp ports (conn-refused)" in text
+    assert "PORT" not in text
+
+
+def test_verbose_disables_collapsing(services):
+    rep = _report_with(200)
+    text = format_normal(rep, services, verbose=1)
+    assert "Not shown:" not in text
+    assert "199/tcp" in text
+
+
+def test_open_ports_are_never_collapsed(services):
+    rep = _report_with(0, open_ports=tuple(range(1, 101)))
+    text = format_normal(rep, services)
+    assert "Not shown:" not in text
+    assert "100/tcp" in text
+
+
+def test_collapsing_is_linear_not_quadratic(services):
+    """
+    Regresja wydajnościowa: poprzednia wersja liczyła `r not in shown`,
+    czyli O(n^2). Przy `-p -` samo formatowanie zajmowało ~157 s.
+    """
+    import time as _time
+
+    rep = _report_with(20000)
+    start = _time.monotonic()
+    format_normal(rep, services)
+    assert _time.monotonic() - start < 5.0
+
+
+def test_threshold_zero_shows_everything(services):
+    rep = _report_with(50)
+    text = format_normal(rep, services, threshold=0)
+    assert "Not shown:" not in text
+    assert "50/tcp" in text
+
+
+def test_skip_reason_is_reported(services):
+    host = HostReport(
+        target=Target(ip="::1"),
+        portlist=PortList(),
+        scanned_ports=[],
+        elapsed_s=0.0,
+        probes_sent=0,
+        replies_received=0,
+        host_up=False,
+        skip_reason="socket(AF_INET6): Address family not supported by protocol",
+    )
+    rep = ScanReport(scan_type=ScanType.CONNECT, hosts=[host], started_at=0.0)
+    text = format_normal(rep, services)
+    assert "Skipping ::1 (socket(AF_INET6)" in text
+
+
+def test_skip_reason_lands_in_json(services):
+    host = HostReport(
+        target=Target(ip="::1"),
+        portlist=PortList(),
+        scanned_ports=[],
+        elapsed_s=0.0,
+        probes_sent=0,
+        replies_received=0,
+        host_up=False,
+        skip_reason="IPv6 nie jest wspierane w -sS; użyj -sT",
+    )
+    rep = ScanReport(scan_type=ScanType.SYN, hosts=[host], started_at=0.0)
+    data = json.loads(format_json(rep, services))
+    assert data["hosts"][0]["skip_reason"] == "IPv6 nie jest wspierane w -sS; użyj -sT"

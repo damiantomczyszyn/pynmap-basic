@@ -36,6 +36,7 @@ from .engine import (
     Probe,
     ScanOptions,
     pick_source_port,
+    select_timeout,
 )
 from .ports import PortList
 from .targets import Target
@@ -191,6 +192,7 @@ class SynScanner:
                     probes_sent=0,
                     replies_received=0,
                     host_up=False,
+                    skip_reason="IPv6 nie jest wspierane w -sS; użyj -sT",
                 )
             )
 
@@ -221,6 +223,13 @@ class SynScanner:
         while progress:
             progress = False
             for host in hosts:
+                # Grupowe okno zatłoczenia: do tej pory było liczone
+                # (ack/drop_group), ale nigdy nie odpytywane, więc w -sS
+                # tempo ograniczało wyłącznie okno per-host. W -sT ta
+                # bramka jest od początku — teraz oba silniki działają
+                # tak samo.
+                if len(self._outstanding) >= int(self.group_timing.cwnd) + self.perf.low_cwnd:
+                    return
                 if host.timed_out or not host.send_ok(now):
                     continue
 
@@ -400,16 +409,7 @@ class SynScanner:
         self.group_timing.ack(self.perf)
 
     def _select_timeout(self, hosts: list[HostScanStats]) -> float:
-        now = time.monotonic()
-        soonest = None
-        for host in hosts:
-            for probe in host.outstanding.values():
-                if soonest is None or probe.timeout_at < soonest:
-                    soonest = probe.timeout_at
-
-        if soonest is None:
-            return 0.0 if any(h.work_left() for h in hosts) else 0.01
-        return max(0.0, min(soonest - now, 0.1))
+        return select_timeout(hosts, time.monotonic())
 
     def _build_report(self, host: HostScanStats) -> HostReport:
         return HostReport(
@@ -420,6 +420,8 @@ class SynScanner:
             probes_sent=host.probes_sent,
             replies_received=host.replies_received,
             timed_out=host.timed_out,
+            host_up=host.skip_reason is None,
+            skip_reason=host.skip_reason,
         )
 
 

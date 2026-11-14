@@ -247,6 +247,10 @@ def test_syn_scan_skips_ipv6_targets():
     reports = syn_scan([Target(ip="::1", family=socket.AF_INET6)], opts)
     assert len(reports) == 1
     assert reports[0].host_up is False
+    # powód jedzie w raporcie, a nie jest zaszyty na sztywno w output.py,
+    # żeby "Skipping ..." nie kłamało przy innych przyczynach pominięcia
+    assert reports[0].skip_reason is not None
+    assert "-sT" in reports[0].skip_reason
 
 
 def test_raw_socket_error_message_mentions_alternative():
@@ -256,3 +260,48 @@ def test_raw_socket_error_message_mentions_alternative():
         "Alternatywa bez roota: -sT (connect scan)."
     )
     assert "-sT" in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Grupowe okno zatłoczenia bramkuje wysyłkę (jak w -sT)
+# ---------------------------------------------------------------------------
+
+
+def test_group_cwnd_limits_probes_in_flight():
+    """
+    group_timing było liczone (ack/drop_group), ale nigdy nie odpytywane,
+    więc w -sS tempo ograniczało tylko okno per-host. Nie wymaga raw
+    socketów: podmieniamy samą wysyłkę.
+    """
+    from pynmap.engine import HostScanStats, Probe
+
+    opts = ScanOptions(
+        scan_type=ScanType.SYN,
+        ports=list(range(1, 501)),
+        timing=TIMING_TEMPLATES[4],
+        randomize_ports=False,
+        resolve_dns=False,
+    )
+    perf = opts.build_perf()
+    scanner = SynScanner(opts, perf)
+
+    now = time.monotonic()
+    host = HostScanStats(Target(ip="192.0.2.1"), opts, perf, now=now)
+    host.source_ip = "192.0.2.2"
+
+    def fake_send(host_, port, when):
+        probe = Probe(
+            port=port, tryno=0, sent_at=when,
+            timeout_at=when + 10.0, seq=1, sport=40000,
+        )
+        host_.register_sent(probe, when)
+        scanner._outstanding[(host_.target.ip, port)] = (host_, probe)
+        return True
+
+    scanner._send_syn = fake_send
+    scanner._send_new_probes([host], now)
+
+    gate = int(scanner.group_timing.cwnd) + perf.low_cwnd
+    assert len(scanner._outstanding) <= gate
+    # bramka musi faktycznie przyciąć wysyłkę, a nie przepuścić 500 sond
+    assert len(scanner._outstanding) < 500

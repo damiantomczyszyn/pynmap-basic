@@ -11,14 +11,23 @@ from __future__ import annotations
 
 import json
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 
 from .constants import PortState
 from .engine import HostReport, ScanReport
+from .ports import PortResult
 from .services import ServiceDB
 
 VERSION = "0.1.0"
 PROJECT_URL = "https://github.com/damiantomczyszyn/pynmap-basic"
+
+# Ile portów w jednym stanie wystarcza, by nmap zwinął je do jednej linii
+# "Not shown: ...". Bez tego `-p -` wypisywał 65535 wierszy, czyli coś,
+# czego nikt nie czyta, a czego nmap nigdy nie pokazuje.
+# -v wyłącza zwijanie (tak jak w nmapie).
+IGNORE_STATE_THRESHOLD = 25
+
+_INTERESTING = (PortState.OPEN, PortState.OPEN_FILTERED)
 
 
 def _fmt_latency(report: HostReport) -> str:
@@ -35,12 +44,68 @@ def _port_label(port: int) -> str:
     return f"{port}/tcp"
 
 
+def _summarize_hidden(
+    hidden: list[PortResult],
+) -> list[tuple[PortState, int, object | None]]:
+    """Dla każdego ukrytego stanu: ile portów i jaki powód dominuje."""
+    by_state: Counter = Counter()
+    by_reason: dict[PortState, Counter] = defaultdict(Counter)
+    for entry in hidden:
+        by_state[entry.state] += 1
+        by_reason[entry.state][entry.reason] += 1
+
+    summary = []
+    for state, count in by_state.most_common():
+        top = by_reason[state].most_common(1)
+        summary.append((state, count, top[0][0] if top else None))
+    return summary
+
+
+def split_results(
+    results: list[PortResult],
+    only_open: bool = False,
+    verbose: int = 0,
+    threshold: int = IGNORE_STATE_THRESHOLD,
+) -> tuple[list[PortResult], list[tuple[PortState, int, object | None]]]:
+    """
+    Dzieli wyniki na pokazywane i zwinięte — odpowiednik decyzji
+    o "ignored states" z printportoutput() w output.cc.
+
+    Liniowo względem liczby portów. Poprzednia wersja liczyła
+    `[r for r in results if r not in shown]`, czyli O(n^2) po dataclassach:
+    dla `-p -` samo formatowanie zajmowało ~157 s po 1,3-sekundowym skanie,
+    i to żeby zbudować listę, która w tej gałęzi jest zawsze pusta.
+    """
+    if only_open:
+        shown = [r for r in results if r.state in _INTERESTING]
+        hidden = [r for r in results if r.state not in _INTERESTING]
+        return shown, _summarize_hidden(hidden)
+
+    # -v pokazuje wszystko, jak w nmapie
+    if verbose or threshold <= 0:
+        return list(results), []
+
+    counts = Counter(r.state for r in results)
+    ignored = {
+        state
+        for state, count in counts.items()
+        if count > threshold and state not in _INTERESTING
+    }
+    if not ignored:
+        return list(results), []
+
+    shown = [r for r in results if r.state not in ignored]
+    hidden = [r for r in results if r.state in ignored]
+    return shown, _summarize_hidden(hidden)
+
+
 def format_normal(
     report: ScanReport,
     services: ServiceDB,
     only_open: bool = False,
     show_reason: bool = False,
     verbose: int = 0,
+    threshold: int = IGNORE_STATE_THRESHOLD,
 ) -> str:
     lines: list[str] = []
     started = time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(report.started_at))
@@ -51,10 +116,8 @@ def format_normal(
     for host in report.hosts:
         if not host.host_up:
             lines.append("")
-            lines.append(
-                f"Skipping {host.target.display_name} "
-                f"(IPv6 nie jest wspierane w -sS; użyj -sT)"
-            )
+            reason = host.skip_reason or "host pominięty"
+            lines.append(f"Skipping {host.target.display_name} ({reason})")
             continue
 
         hosts_up += 1
@@ -67,27 +130,31 @@ def format_normal(
             continue
 
         results = host.portlist.sorted_results()
-        shown = [
-            r for r in results
-            if not only_open or r.state in (PortState.OPEN, PortState.OPEN_FILTERED)
-        ]
-        hidden = [r for r in results if r not in shown]
+        shown, hidden = split_results(
+            results, only_open=only_open, verbose=verbose, threshold=threshold
+        )
 
         # "Not shown: N closed tcp ports (conn-refused)" — jak w nmapie
+        not_shown = ""
         if hidden:
-            by_state = Counter(r.state for r in hidden)
-            parts = []
-            for state, count in by_state.most_common():
-                reasons = Counter(
-                    r.reason for r in hidden if r.state == state
-                ).most_common(1)
-                reason_txt = f" ({reasons[0][0]})" if reasons else ""
-                parts.append(f"{count} {state} tcp port{'s' if count != 1 else ''}{reason_txt}")
-            lines.append("Not shown: " + ", ".join(parts))
+            parts = [
+                f"{count} {state} tcp port{'s' if count != 1 else ''}"
+                + (f" ({reason})" if reason is not None else "")
+                for state, count, reason in hidden
+            ]
+            not_shown = "Not shown: " + ", ".join(parts)
 
         if not shown:
-            lines.append("All scanned ports are filtered or closed.")
+            # układ jak w nmapie: najpierw zbiorcze "All ...", potem "Not shown"
+            lines.append(
+                f"All {len(results)} scanned ports on "
+                f"{host.target.display_name} are in ignored states."
+            )
+            if not_shown:
+                lines.append(not_shown)
         else:
+            if not_shown:
+                lines.append(not_shown)
             header = f"{'PORT':<10}{'STATE':<16}{'SERVICE':<18}"
             if show_reason:
                 header += "REASON"
@@ -167,6 +234,7 @@ def format_json(report: ScanReport, services: ServiceDB) -> str:
                 "ip": host.target.ip,
                 "hostname": host.target.hostname or host.target.reverse_dns,
                 "up": host.host_up,
+                "skip_reason": host.skip_reason,
                 "timed_out": host.timed_out,
                 "elapsed_s": round(host.elapsed_s, 4),
                 "probes_sent": host.probes_sent,

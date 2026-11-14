@@ -278,3 +278,80 @@ def test_connect_scan_multiple_hosts(listener):
 
     assert len(reports) == 2
     assert [r.target.ip for r in reports] == ["127.0.0.1", "127.0.0.2"]
+
+
+# ---------------------------------------------------------------------------
+# Błąd socket() nie może wywrócić całego skanu
+# ---------------------------------------------------------------------------
+
+
+def test_unsupported_address_family_skips_host_not_scan(monkeypatch):
+    """
+    Na maszynie z wyłączonym IPv6 socket(AF_INET6) rzuca EAFNOSUPPORT.
+    Kiedyś leciał wtedy goły traceback i ginął cały skan — razem
+    z celami IPv4, które dałyby się przeskanować. Wystarczyło podać
+    nazwę DNS, bo getaddrinfo zwraca też adresy AAAA.
+    """
+    real_socket = socket.socket
+
+    def fake_socket(family, *args, **kwargs):
+        if family == socket.AF_INET6:
+            raise OSError(
+                errno.EAFNOSUPPORT, "Address family not supported by protocol"
+            )
+        return real_socket(family, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "socket", fake_socket)
+
+    opts = ScanOptions(
+        ports=[80],
+        timing=TIMING_TEMPLATES[4],
+        randomize_ports=False,
+        resolve_dns=False,
+        max_retries=0,
+    )
+    targets = [
+        Target(ip="::1", family=socket.AF_INET6),
+        Target(ip="127.0.0.1"),
+    ]
+    reports = connect_scan(targets, opts)
+
+    assert len(reports) == 2
+    by_ip = {r.target.ip: r for r in reports}
+
+    skipped = by_ip["::1"]
+    assert skipped.host_up is False
+    assert skipped.skip_reason is not None
+    assert "AF_INET6" in skipped.skip_reason
+
+    # cel IPv4 w tym samym przebiegu musi zostać przeskanowany
+    scanned = by_ip["127.0.0.1"]
+    assert scanned.host_up is True
+    assert scanned.portlist.get(80).state is not PortState.UNKNOWN
+
+
+def test_fd_exhaustion_requeues_port_instead_of_skipping(monkeypatch):
+    """EMFILE dotyczy chwili, nie hosta — port musi wrócić do kolejki."""
+    real_socket = socket.socket
+    calls = {"n": 0}
+
+    def flaky_socket(family, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_socket(family, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "socket", flaky_socket)
+
+    opts = ScanOptions(
+        ports=[80],
+        timing=TIMING_TEMPLATES[4],
+        randomize_ports=False,
+        resolve_dns=False,
+        max_retries=0,
+    )
+    report = connect_scan([Target(ip="127.0.0.1")], opts)[0]
+
+    assert report.host_up is True
+    assert report.skip_reason is None
+    assert report.portlist.get(80).state is not PortState.UNKNOWN
