@@ -150,15 +150,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+DEFAULT_TOP_PORTS = 100
+
+
 def resolve_ports(args, services: ServiceDB) -> list[int]:
-    """Decyduje, które porty skanować: -p, --top-ports albo domyślne top 100."""
-    if args.port_spec and args.top_ports:
+    """
+    Decyduje, które porty skanować: -p, --top-ports albo domyślne top 100.
+
+    Rozróżnienie "nie podano" od "podano wartość fałszywą" robimy przez
+    `is not None`, a nie przez samą prawdziwość. Inaczej `-p ""` i
+    `--top-ports 0` wpadały w gałąź domyślną i CICHO skanowały top 100 —
+    czyli literówka albo nierozwinięta zmienna środowiskowa dawały skan,
+    o który nikt nie prosił, z kodem wyjścia 0. Osobny strażnik na pustą
+    specyfikację jest w ports.py, ale CLI nigdy do niego nie docierał.
+    """
+    if args.port_spec is not None and args.top_ports is not None:
         raise SystemExit("pynmap: -p i --top-ports wykluczają się")
 
-    if args.port_spec:
+    if args.port_spec is not None:
         return parse_port_spec(args.port_spec, service_lookup=services.port_for_name)
 
-    count = args.top_ports or 100
+    if args.top_ports is None:
+        count = DEFAULT_TOP_PORTS
+    elif args.top_ports <= 0:
+        # nmap: "Argument to --top-ports must be greater than 0"
+        raise PortSpecError("--top-ports wymaga liczby > 0")
+    else:
+        count = args.top_ports
+
     return services.top_ports(min(count, services.available_top_ports))
 
 
