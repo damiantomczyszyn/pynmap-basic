@@ -269,15 +269,21 @@ def test_raw_socket_error_message_mentions_alternative():
 
 def test_group_cwnd_limits_probes_in_flight():
     """
-    group_timing było liczone (ack/drop_group), ale nigdy nie odpytywane,
-    więc w -sS tempo ograniczało tylko okno per-host. Nie wymaga raw
-    socketów: podmieniamy samą wysyłkę.
+    Grupowe okno musi ograniczac sondy w locie PONAD to, co ogranicza
+    okno per-host.
+
+    Poprzednia wersja tego testu byla bezwartosciowa: miala jednego hosta,
+    wiec okno per-host (cwnd 10) trzymalo in_flight na 10 i asercje
+    przechodzily nawet po calkowitym usunieciu bramki grupowej.
+    Z pieciu hostow bez bramki poleciałoby ~5x10 sond, wiec test faktycznie
+    rozroznia obie wersje kodu.
     """
     from pynmap.engine import HostScanStats, Probe
 
+    HOSTS = 5
     opts = ScanOptions(
         scan_type=ScanType.SYN,
-        ports=list(range(1, 501)),
+        ports=list(range(1, 201)),
         timing=TIMING_TEMPLATES[4],
         randomize_ports=False,
         resolve_dns=False,
@@ -286,22 +292,61 @@ def test_group_cwnd_limits_probes_in_flight():
     scanner = SynScanner(opts, perf)
 
     now = time.monotonic()
-    host = HostScanStats(Target(ip="192.0.2.1"), opts, perf, now=now)
-    host.source_ip = "192.0.2.2"
+    hosts = []
+    for i in range(HOSTS):
+        host = HostScanStats(Target(ip=f"192.0.2.{i + 1}"), opts, perf, now=now)
+        host.source_ip = "192.0.2.254"
+        hosts.append(host)
 
     def fake_send(host_, port, when):
         probe = Probe(
             port=port, tryno=0, sent_at=when,
             timeout_at=when + 10.0, seq=1, sport=40000,
         )
-        host_.register_sent(probe, when)
+        host_.register_sent(probe, when, group=scanner.group_timing)
         scanner._outstanding[(host_.target.ip, port)] = (host_, probe)
         return True
 
     scanner._send_syn = fake_send
-    scanner._send_new_probes([host], now)
+    scanner._send_new_probes(hosts, now)
 
     gate = int(scanner.group_timing.cwnd) + perf.low_cwnd
-    assert len(scanner._outstanding) <= gate
-    # bramka musi faktycznie przyciąć wysyłkę, a nie przepuścić 500 sond
-    assert len(scanner._outstanding) < 500
+    in_flight = len(scanner._outstanding)
+
+    assert in_flight <= gate, f"{in_flight} sond w locie przy bramce {gate}"
+    # bez bramki grupowej pierwszy przebieg wyslalby po 10 sond na hosta
+    assert in_flight < HOSTS * 10
+
+
+def test_group_cwnd_actually_grows():
+    """
+    Okno grupowe musi rosnac na odpowiedziach.
+
+    Dotad num_replies_expected grupy nikt nie inkrementowal (register_sent
+    podbijalo tylko licznik hosta), wiec cc_scale() zwracalo 0.0, ack()
+    mnozylo przyrost przez zero i cwnd stalo na 10 na zawsze. Bramka oparta
+    na takim oknie byla stalym sufitem, a nie okienkiem AIMD.
+    """
+    from pynmap.engine import HostScanStats, Probe
+    from pynmap.timing import UltraTimingVals
+
+    opts = ScanOptions(
+        scan_type=ScanType.SYN,
+        ports=list(range(1, 300)),
+        timing=TIMING_TEMPLATES[4],
+        resolve_dns=False,
+    )
+    perf = opts.build_perf()
+    group = UltraTimingVals.init_for(perf, group=True, now=0.0)
+    host = HostScanStats(Target(ip="192.0.2.1"), opts, perf, now=0.0)
+
+    start = group.cwnd
+    for port in range(1, 201):
+        host.register_sent(
+            Probe(port=port, tryno=0, sent_at=0.0, timeout_at=99.0), 0.0, group=group
+        )
+        group.ack(perf)
+
+    assert group.num_replies_expected == 200
+    assert group.cc_scale(perf) == pytest.approx(1.0)
+    assert group.cwnd > start, "grupowe cwnd nie rosnie, wiec bramka to staly sufit"

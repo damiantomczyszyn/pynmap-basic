@@ -168,7 +168,11 @@ class HostScanStats:
         )
 
         self.start_time = now
-        self.last_probe_sent = 0.0
+        # None, a NIE 0.0: 0.0 jest poprawnym punktem na skali time.monotonic()
+        # (czyli chwila bootu), wiec na swiezo wystartowanej maszynie wyrazenie
+        # last_probe_sent + scan_delay wypadalo w PRZYSZLOSCI i pierwsza sonda
+        # byla wstrzymywana o (scan_delay - uptime) sekund.
+        self.last_probe_sent: float | None = None
         self.probes_sent = 0
         self.replies_received = 0
         self.timed_out = False
@@ -220,7 +224,7 @@ class HostScanStats:
             return False
 
         delay = self.opts.effective_scan_delay_s()
-        if delay > 0:
+        if delay > 0 and self.last_probe_sent is not None:
             return (now - self.last_probe_sent) >= delay
 
         return True
@@ -235,7 +239,7 @@ class HostScanStats:
         100% CPU przez całą przerwę (przy -T0 to 300 s na sondę).
         """
         delay = self.opts.effective_scan_delay_s()
-        if delay <= 0:
+        if delay <= 0 or self.last_probe_sent is None:
             return 0.0
         return self.last_probe_sent + delay
 
@@ -254,11 +258,19 @@ class HostScanStats:
 
     # -- rejestracja zdarzeń ------------------------------------------------
 
-    def register_sent(self, probe: Probe, now: float) -> None:
+    def register_sent(
+        self, probe: Probe, now: float, group: UltraTimingVals | None = None
+    ) -> None:
         self.outstanding[probe.key] = probe
         self.last_probe_sent = now
         self.probes_sent += 1
         self.timing.num_replies_expected += 1
+        # Grupowe okno ma własne liczniki i też musi je dostać. Bez tego
+        # num_replies_expected zostawało 0, cc_scale() zwracało 0.0, a ack()
+        # mnożyło przyrost przez zero — grupowe cwnd nigdy nie rosło, więc
+        # bramka oparta na nim była stałym sufitem, a nie okienkiem AIMD.
+        if group is not None:
+            group.num_replies_expected += 1
 
     def register_reply(
         self,
@@ -394,19 +406,22 @@ def select_timeout(
     if soonest is not None:
         return max(0.0, min(soonest - now, max_wait))
 
-    pending_sends = [
-        host.next_send_allowed_at()
-        for host in hosts
-        if host.work_left() and not host.timed_out
-    ]
-    if not pending_sends:
+    waiting = [host for host in hosts if host.work_left() and not host.timed_out]
+    if not waiting:
         return 0.01
 
-    earliest = min(pending_sends)
-    if earliest <= now:
-        # wolno wysyłać teraz — nie ma na co czekać
+    earliest = min(host.next_send_allowed_at() for host in waiting)
+    if earliest > now:
+        return max(0.0, min(earliest - now, max_wait))
+
+    # Zegar mówi "można wysyłać", ale to jeszcze nie znaczy, że ktokolwiek
+    # faktycznie może: okno zatłoczenia też musi przepuścić. Zwrócenie tu 0.0
+    # bez tego sprawdzenia zamieniało zablokowane okno w pętlę na 100% CPU
+    # bez żadnego wyjścia (np. --min-parallelism -1 --max-parallelism -1
+    # daje cwnd = -1, czyli send_ok() na zawsze False).
+    if any(host.send_ok(now) for host in waiting):
         return 0.0
-    return max(0.0, min(earliest - now, max_wait))
+    return max_wait
 
 
 def max_sockets_allowed() -> int:

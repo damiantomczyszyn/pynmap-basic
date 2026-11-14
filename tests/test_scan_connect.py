@@ -12,7 +12,7 @@ import pytest
 
 from pynmap.constants import PortState, Reason, ScanType
 from pynmap.engine import HostScanStats, Probe, ScanOptions
-from pynmap.scan_connect import classify_connect_errno, connect_scan
+from pynmap.scan_connect import ConnectScanner, classify_connect_errno, connect_scan
 from pynmap.targets import Target
 from pynmap.timing import TIMING_TEMPLATES
 
@@ -355,3 +355,87 @@ def test_fd_exhaustion_requeues_port_instead_of_skipping(monkeypatch):
     assert report.host_up is True
     assert report.skip_reason is None
     assert report.portlist.get(80).state is not PortState.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# --host-timeout nie moze wymyslac stanow portow
+# ---------------------------------------------------------------------------
+
+
+def test_finish_host_does_not_finalize_a_timed_out_host():
+    """
+    Po --host-timeout raportujemy TYLKO porty, do ktorych poszla sonda.
+
+    finalize() dopisuje kazdemu niezbadanemu portowi domyslne 'filtered',
+    wiec porzucony host wygladal na w pelni przeskanowany: wyjscie tekstowe
+    mowilo "Skipping host due to host timeout", ale -oG i -oJ wypisywaly
+    pelna liste portow z WYMYSLONYMI stanami — i to wlasnie te formaty
+    sie parsuje.
+
+    Test celuje w sam punkt decyzyjny, bez wyscigu z zegarem: poprzednia
+    wersja robila prawdziwy skan z --host-timeout 100ms i przechodzila albo
+    nie, zaleznie od obciazenia maszyny.
+    """
+    opts = ScanOptions(
+        ports=[22, 80, 443],
+        timing=TIMING_TEMPLATES[4],
+        randomize_ports=False,
+        resolve_dns=False,
+    )
+    perf = opts.build_perf()
+    scanner = ConnectScanner(opts, perf)
+    host = HostScanStats(Target(ip="192.0.2.1"), opts, perf, now=time.monotonic())
+
+    # jeden port zdazyl odpowiedziec, pozostale dwie sondy nigdy nie poszly
+    host.portlist.set_state(22, PortState.OPEN, Reason.CONACCEPT, rtt_us=120)
+    host.timed_out = True
+
+    scanner._finish_host(host)
+
+    assert set(host.portlist.results) == {22}, "stany portow 80/443 zostaly wymyslone"
+
+
+def test_finish_host_finalizes_a_completed_host():
+    """Kontrola: host dobiegniety do konca MUSI miec kazdy zamowiony port."""
+    opts = ScanOptions(
+        ports=[22, 80, 443],
+        timing=TIMING_TEMPLATES[4],
+        randomize_ports=False,
+        resolve_dns=False,
+    )
+    perf = opts.build_perf()
+    scanner = ConnectScanner(opts, perf)
+    host = HostScanStats(Target(ip="192.0.2.1"), opts, perf, now=time.monotonic())
+    host.portlist.set_state(22, PortState.OPEN, Reason.CONACCEPT, rtt_us=120)
+
+    scanner._finish_host(host)
+
+    assert set(host.portlist.results) == {22, 80, 443}
+    assert host.portlist.get(80).state is PortState.FILTERED
+
+
+def test_host_timeout_end_to_end_never_invents_states(listener):
+    """
+    Ten sam niezmiennik na prawdziwym skanie, ale sformulowany warunkowo,
+    zeby nie scigac sie z zegarem: albo host sie przerwal i wtedy KAZDY
+    zaraportowany port ma prawdziwy pomiar, albo dobiegl do konca i wtedy
+    raport jest kompletny. Obie galezie sa poprawne, zadna nie jest flaky.
+    """
+    ports = list(range(1, 4001))
+    opts = ScanOptions(
+        ports=ports,
+        timing=TIMING_TEMPLATES[4],
+        randomize_ports=False,
+        resolve_dns=False,
+        host_timeout_s=0.1,
+        max_retries=0,
+    )
+    report = connect_scan([Target(ip="127.0.0.1")], opts)[0]
+    results = report.portlist.results
+
+    if report.timed_out:
+        assert results, "porzucony host nie zaraportowal ani jednego portu"
+        assert all(r.rtt_us is not None for r in results.values())
+        assert len(results) <= report.probes_sent
+    else:
+        assert len(results) == len(ports)

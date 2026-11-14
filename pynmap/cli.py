@@ -43,6 +43,26 @@ def parse_time(value: str) -> float:
     return amount * factors[unit]
 
 
+def _positive_int(value: str) -> int:
+    """
+    Liczba >= 0 dla --min/--max-parallelism.
+
+    Wartości ujemne przechodziły przez argparse i trafiały wprost do
+    ScanPerformanceVars, gdzie low_cwnd i max_cwnd stawały się ujemne.
+    Wtedy int(cwnd) < 0, send_ok() jest na zawsze False i skan kręcił się
+    bez końca na 100% CPU, nie wypisując ani jednego portu.
+    """
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"'{value}' nie jest liczbą całkowitą") from exc
+    if number < 0:
+        raise argparse.ArgumentTypeError(
+            f"oczekiwano liczby >= 0, otrzymano {number} (0 = bez wymuszenia)"
+        )
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pynmap",
@@ -116,8 +136,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="porzuć host po tym czasie, np. 30s, 5m")
     timing.add_argument("--scan-delay", type=parse_time, metavar="CZAS",
                         help="minimalna przerwa między sondami")
-    timing.add_argument("--min-parallelism", type=int, default=0, metavar="N")
-    timing.add_argument("--max-parallelism", type=int, default=0, metavar="N")
+    timing.add_argument("--min-parallelism", type=_positive_int, default=0, metavar="N",
+                        help="minimalna liczba sond w locie (0 = bez wymuszenia)")
+    timing.add_argument("--max-parallelism", type=_positive_int, default=0, metavar="N",
+                        help="maksymalna liczba sond w locie (0 = dynamicznie, wg cwnd)")
     timing.add_argument("--seed", type=int, metavar="N",
                         help="ziarno losowania kolejności portów (powtarzalne testy)")
 
@@ -188,6 +210,19 @@ def main(argv: list[str] | None = None) -> int:
     if not args.targets:
         parser.print_help()
         return 0
+
+    # Sprzeczne okno: dotychczas max było po cichu wyrzucane
+    # (low_cwnd = max_cwnd = min_parallelism), czyli flaga --max-parallelism
+    # nie robiła nic, mimo że użytkownik ją podał.
+    if args.min_parallelism and args.max_parallelism and (
+        args.min_parallelism > args.max_parallelism
+    ):
+        print(
+            f"pynmap: --min-parallelism ({args.min_parallelism}) nie może być większe "
+            f"niż --max-parallelism ({args.max_parallelism})",
+            file=sys.stderr,
+        )
+        return 2
 
     services = ServiceDB(services_path=args.services)
 

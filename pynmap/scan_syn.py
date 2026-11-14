@@ -175,7 +175,10 @@ class SynScanner:
 
                 finished = [h for h in incomplete if h.completed() or h.timed_out]
                 for host in finished:
-                    host.finalize()
+                    # jak w -sT: po --host-timeout nie dopisujemy 'filtered'
+                    # portom, do których nie poszła żadna sonda
+                    if not host.timed_out:
+                        host.finalize()
                     reports.append(self._build_report(host))
                     incomplete.remove(host)
         finally:
@@ -282,7 +285,7 @@ class SynScanner:
             seq=seq,
             sport=self.source_port,
         )
-        host.register_sent(probe, now)
+        host.register_sent(probe, now, group=self.group_timing)
         self._outstanding[(host.target.ip, port)] = (host, probe)
         return True
 

@@ -189,7 +189,7 @@ docs/
   port-states.md         tablice decyzyjne errno/flagi -> stan portu
   rozszerzenia.md        plan dojścia do nmapa: tryby, fazy, koszty
 
-tests/                   208 testów (pytest)
+tests/                   228 testów (pytest)
 ```
 
 ---
@@ -232,7 +232,7 @@ pip install pytest
 python3 -m pytest tests/ -v
 ```
 
-208 testów. Pokrywają m.in.:
+228 testów. Pokrywają m.in.:
 
 - zgodność estymatora RTT z wzorami z `timing.cc` (łącznie z zachowaniem
   przesunięć bitowych na liczbach ujemnych),
@@ -248,8 +248,13 @@ python3 -m pytest tests/ -v
 - zwijanie stanów w wyjściu (`Not shown:`) wraz z regresją wydajnościową,
 - czekanie na `--scan-delay` bez kręcenia się na 100% CPU,
 - pominięcie hosta, gdy `socket()` zawiedzie (np. wyłączony IPv6),
-- warstwę CLI: `-p ""` i `--top-ports 0` muszą być błędem, a nie cichym
-  skanem domyślnych 100 portów.
+- warstwę CLI: `-p ""`, `--top-ports 0` i ujemne `--min/--max-parallelism`
+  muszą być błędem, a nie cichym skanem domyślnych 100 portów albo pętlą
+  bez wyjścia,
+- że `--host-timeout` nie dopisuje wymyślonych stanów portom, do których
+  nie poszła żadna sonda,
+- że grupowe okno zatłoczenia faktycznie rośnie, a nie stoi na wartości
+  początkowej.
 
 Testy SYN scanu wymagające `CAP_NET_RAW` są automatycznie pomijane bez
 uprawnień, więc `pytest` przechodzi też na zwykłym koncie.

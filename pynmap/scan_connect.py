@@ -213,7 +213,7 @@ class ConnectScanner:
 
         if code in _IN_PROGRESS:
             # typowa droga: czekamy na gotowość do zapisu
-            host.register_sent(probe, now)
+            host.register_sent(probe, now, group=self.group_timing)
             try:
                 self._selector.register(sock, selectors.EVENT_WRITE)
             except (KeyError, ValueError):  # pragma: no cover - obronnie
@@ -225,7 +225,7 @@ class ConnectScanner:
             return
 
         # rozstrzygnięte natychmiast (typowe dla localhost i dla RST)
-        host.register_sent(probe, now)
+        host.register_sent(probe, now, group=self.group_timing)
         state, reason = classify_connect_errno(code)
         if state is PortState.UNKNOWN:
             state, reason = PortState.FILTERED, Reason.NORESPONSE
@@ -361,7 +361,14 @@ class ConnectScanner:
     def _finish_host(self, host: HostScanStats) -> None:
         for probe in list(host.outstanding.values()):
             self._close_probe_socket(probe)
-        if host.skip_reason is None:
+        # Hosta porzuconego (--host-timeout) ani pominiętego NIE finalizujemy:
+        # finalize() dopisuje każdemu niezbadanemu portowi domyślne 'filtered',
+        # czyli WYMYŚLA stany dla portów, do których nie poszła ani jedna
+        # sonda. W wyjściu tekstowym to nie było widoczne ("Skipping host due
+        # to host timeout"), ale -oG i -oJ wypisywały pełną listę portów —
+        # i to właśnie te formaty się parsuje. nmap po host-timeout nie
+        # raportuje portów hosta.
+        if host.skip_reason is None and not host.timed_out:
             host.finalize()
 
     def _cleanup(self) -> None:

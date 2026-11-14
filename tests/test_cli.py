@@ -118,3 +118,45 @@ def test_default_timing_is_normal():
 def test_randomize_is_on_unless_dash_r():
     assert _args(["127.0.0.1"]).randomize is True
     assert _args(["-r", "127.0.0.1"]).randomize is False
+
+
+# ---------------------------------------------------------------------------
+# --min/--max-parallelism: wartosci, ktore zabijaly skan
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flag", ["--min-parallelism", "--max-parallelism"])
+def test_negative_parallelism_is_rejected(flag):
+    """
+    Ujemne okno dawalo cwnd < 0, send_ok() na zawsze False i skan krecacy sie
+    bez konca na 100% CPU, bez ani jednej linii wyjscia.
+    """
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([flag, "-1", "127.0.0.1"])
+
+
+@pytest.mark.parametrize("flag", ["--min-parallelism", "--max-parallelism"])
+def test_zero_parallelism_means_no_limit(flag):
+    args = build_parser().parse_args([flag, "0", "127.0.0.1"])
+    assert getattr(args, flag.lstrip("-").replace("-", "_")) == 0
+
+
+@pytest.mark.parametrize("flag", ["--min-parallelism", "--max-parallelism"])
+def test_non_integer_parallelism_is_rejected(flag):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([flag, "abc", "127.0.0.1"])
+
+
+def test_min_above_max_parallelism_is_rejected():
+    """Sprzeczne okno: dotad max bylo po cichu wyrzucane i flaga nic nie robila."""
+    from pynmap.cli import main
+
+    assert main(["-sT", "-p", "22", "-n", "--min-parallelism", "5",
+                 "--max-parallelism", "2", "127.0.0.1"]) == 2
+
+
+def test_min_below_max_parallelism_is_accepted():
+    args = build_parser().parse_args(
+        ["--min-parallelism", "2", "--max-parallelism", "5", "127.0.0.1"]
+    )
+    assert (args.min_parallelism, args.max_parallelism) == (2, 5)

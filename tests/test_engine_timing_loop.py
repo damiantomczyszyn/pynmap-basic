@@ -121,3 +121,88 @@ def test_timed_out_host_is_not_waited_for():
     host = _host([80, 443], now, scan_delay_s=5.0)
     host.timed_out = True
     assert select_timeout([host], now) == 0.01
+
+
+# ---------------------------------------------------------------------------
+# last_probe_sent: sentinel "nic nie wyslano" nie moze byc punktem na skali
+# ---------------------------------------------------------------------------
+
+
+def test_first_probe_is_not_delayed_by_scan_delay():
+    """
+    --scan-delay to przerwa MIEDZY sondami, wiec pierwsza sonda idzie od razu.
+
+    Sentinel last_probe_sent byl kiedys 0.0, czyli poprawnym punktem na skali
+    time.monotonic() (chwila bootu). Na maszynie o uptime mniejszym niz
+    scan_delay wyrazenie last_probe_sent + delay wypadalo w PRZYSZLOSCI
+    i pierwsza sonda byla wstrzymywana o (scan_delay - uptime) sekund:
+    do 300 s przy -T0. Test odtwarza to, podajac maly `now`.
+    """
+    now = 2.0  # jakby maszyna wstala 2 s temu
+    host = _host([80, 443], now, scan_delay_s=60.0)
+
+    assert host.last_probe_sent is None
+    assert host.next_send_allowed_at() == 0.0
+    assert host.send_ok(now) is True
+    assert select_timeout([host], now) == 0.0
+
+
+def test_scan_delay_applies_after_the_first_probe():
+    """...ale po pierwszej sondzie przerwa juz obowiazuje."""
+    now = 2.0
+    host = _host([80, 443], now, scan_delay_s=60.0)
+    host.register_sent(
+        Probe(port=80, tryno=0, sent_at=now, timeout_at=now + 1.0), now
+    )
+    host.outstanding.clear()
+
+    assert host.last_probe_sent == now
+    assert host.next_send_allowed_at() == now + 60.0
+    assert host.send_ok(now) is False
+    assert select_timeout([host], now, max_wait=0.1) == 0.1
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+def test_delaying_templates_still_send_immediately_on_fresh_boot(level):
+    now = 2.0
+    opts = ScanOptions(ports=[80, 443], timing=TIMING_TEMPLATES[level])
+    host = HostScanStats(Target(ip="192.0.2.1"), opts, opts.build_perf(), now=now)
+    assert host.send_ok(now) is True, f"-T{level} wstrzymuje pierwsza sonde"
+    assert select_timeout([host], now) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Zablokowane okno zatloczenia nie moze dawac petli na 100% CPU
+# ---------------------------------------------------------------------------
+
+
+def test_blocked_window_waits_instead_of_spinning():
+    """
+    Gdy zegar pozwala wysylac, ale okno zatloczenia nie przepuszcza zadnej
+    sondy, select_timeout() NIE moze zwrocic 0.0 — to byla petla na 100% CPU
+    bez zadnego wyjscia i bez jednej linii wyjscia.
+    """
+    now = 100.0
+    host = _host([80, 443], now)
+    host.timing.cwnd = 0.0  # okno zamkniete, nic nie leci
+
+    assert host.in_flight == 0
+    assert host.send_ok(now) is False
+    assert host.work_left() is True
+    assert select_timeout([host], now, max_wait=0.1) == 0.1
+
+
+def test_open_window_still_returns_zero():
+    """Kontrola: gdy wolno wysylac, timeout musi byc 0, zeby nie zwalniac skanu."""
+    now = 100.0
+    host = _host([80, 443], now)
+    assert host.send_ok(now) is True
+    assert select_timeout([host], now) == 0.0
+
+
+def test_negative_parallelism_cannot_produce_dead_window():
+    """ScanPerformanceVars broni sie przed cwnd <= 0 nawet wolane z API."""
+    opts = ScanOptions(ports=[80], timing=TIMING_TEMPLATES[3], min_parallelism=-1)
+    perf = opts.build_perf()
+    assert perf.low_cwnd >= 1
+    assert perf.max_cwnd >= perf.low_cwnd

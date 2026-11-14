@@ -239,7 +239,11 @@ def format_json(report: ScanReport, services: ServiceDB) -> str:
                 "elapsed_s": round(host.elapsed_s, 4),
                 "probes_sent": host.probes_sent,
                 "replies_received": host.replies_received,
-                "ports_scanned": len(host.scanned_ports),
+                # liczba portów, dla których MAMY wynik. Dla hosta
+                # dobiegniętego do końca równa się liczbie zamówionych;
+                # po --host-timeout jest mniejsza i to jest prawda.
+                "ports_scanned": len(host.portlist.results),
+                "ports_requested": len(host.scanned_ports),
                 "ports": [
                     {
                         "port": entry.port,

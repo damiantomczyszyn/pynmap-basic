@@ -360,6 +360,12 @@ Rzeczy, które nie dodają trybów, ale zmieniają to, ile można kodowi zaufać
 - **Benchmark w CI z progiem.** Błąd O(n²) w formatowaniu (2 m 38 s przy
   `-p -`) nie został złapany przez 164 testy, bo żaden nie mierzył czasu
   na dużym wejściu. Jeden test z progiem wystarczy.
+- **Testowanie mutacyjne.** Najtańszy sposób odpowiedzenia na pytanie „czy
+  ten test w ogóle coś chroni". Przy przeglądzie wyszło, że jeden test
+  regresyjny przechodził po **całkowitym usunięciu** sprawdzanej bramki —
+  bo ograniczenie wymuszał w tym scenariuszu inny mechanizm. Procedura:
+  wycofaj poprawkę w kopii repo, uruchom jej test, sprawdź, czy czerwieni.
+  Warto to zautomatyzować (`mutmut`, `cosmic-ray`) choćby dla `pynmap/`.
 
 ### Jakość kodu
 
@@ -378,10 +384,15 @@ Rzeczy, które nie dodają trybów, ale zmieniają to, ile można kodowi zaufać
 - **Okno grupowe a sondy rozstrzygnięte natychmiast.** W `-sT` sondy,
   które `connect()` rozstrzyga od razu (localhost, RST), nie wchodzą do
   `_pending`, więc nie podlegają bramce grupowego cwnd. Na szybkich celach
-  okno grupowe praktycznie nie ogranicza niczego.
-- **`--host-timeout` a stan portów.** Po przekroczeniu limitu `finalize()`
-  dopisuje pozostałym portom `filtered`. Nmap porzuca host i **nie
-  raportuje** jego portów. Dziś wynik wygląda na kompletny, choć nie jest.
+  okno grupowe praktycznie nie ogranicza niczego. (Osobna sprawa — sam
+  wzrost okna — została już naprawiona: `register_sent()` podbija teraz
+  `num_replies_expected` grupy, bez czego `cc_scale()` zwracało 0.0
+  i grupowe `cwnd` stało na wartości początkowej na zawsze.)
+- ~~**`--host-timeout` a stan portów.**~~ Naprawione: porzucony host nie
+  przechodzi już przez `finalize()`, więc `-oG`/`-oJ` pokazują tylko porty,
+  do których faktycznie poszła sonda. W JSON-ie doszło pole
+  `ports_requested` obok `ports_scanned`, żeby dało się odróżnić „zamówiono"
+  od „zmierzono".
 - **Weryfikacja stałych timingowych.** Dzielniki `ssthresh` w
   `ScanPerformanceVars.from_template()` (1.5 / 4÷3 / 5÷4) warto zestawić
   linijka w linijkę ze `scan_performance_vars::init()` w `timing.cc`
