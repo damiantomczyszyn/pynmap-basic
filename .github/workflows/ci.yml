@@ -120,7 +120,10 @@ jobs:
           NGINX="${{ steps.targets.outputs.nginx }}"
           REDIS="${{ steps.targets.outputs.redis }}"
 
-          sudo "$(which python)" ci/network_check.py \
+          # sudo domyślnie czyści środowisko, więc bez --preserve-env
+          # wynik skanu traci informację, z jakiego commita pochodzi.
+          sudo --preserve-env=GITHUB_SHA,GITHUB_REF_NAME,GITHUB_SERVER_URL,GITHUB_REPOSITORY,GITHUB_RUN_ID \
+            "$(which python)" ci/network_check.py \
             --expect-open   "$NGINX:80" \
             --expect-closed "$NGINX:6379" \
             --expect-closed "$NGINX:22" \
@@ -189,15 +192,47 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------
-  # 3. Budowa i publikacja strony na GitHub Pages
+  # 3. Test strony end-to-end: prawdziwy index.html w jsdom z prawdziwym
+  #    Pyodide. To jedyna rzecz, która weryfikuje, że opublikowana strona
+  #    faktycznie bootuje i liczy, a nie tylko że pliki się skopiowały.
+  # ---------------------------------------------------------------------
+  page:
+    name: Test strony (jsdom + Pyodide)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Złożenie strony
+        run: python3 web/build_site.py _preview
+
+      - name: Instalacja jsdom i Pyodide
+        working-directory: web
+        run: npm install --no-audit --no-fund
+
+      - name: Uruchomienie strony w jsdom
+        env:
+          PYNMAP_SITE: ${{ github.workspace }}/_preview
+        run: node web/test_page.mjs
+
+  # ---------------------------------------------------------------------
+  # 4. Budowa i publikacja strony na GitHub Pages
   #    Deployuje tylko wtedy, gdy testy przeszły — strona zawsze odpowiada
   #    przetestowanemu commitowi. Wynik skanu dociąga z joba `network`,
   #    ale jego brak nie blokuje publikacji.
   # ---------------------------------------------------------------------
   pages:
     name: Publikacja na GitHub Pages
-    needs: [test, network]
-    if: ${{ always() && needs.test.result == 'success' && github.ref == 'refs/heads/main' }}
+    needs: [test, network, page]
+    if: ${{ always() && needs.test.result == 'success' && needs.page.result == 'success' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
 
     permissions:
@@ -212,38 +247,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Złożenie katalogu site/
-        run: |
-          mkdir -p site/pynmap site/data
-
-          cp web/index.html web/app.js web/bridge.py site/
-          # Do przeglądarki idzie tylko warstwa algorytmiczna — moduły
-          # scan_connect/scan_syn wymagają socketów, których tam nie ma.
-          for m in constants timing ports services targets tcpip; do
-            cp "pynmap/$m.py" site/pynmap/
-          done
-
-          # Pages domyślnie przepuszcza treść przez Jekylla, co psuje
-          # pliki zaczynające się od podkreślenia i katalogi z kropką.
-          touch site/.nojekyll
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Dociągnięcie wyniku realnego skanu
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           name: scan-results
-          path: site/data
+          path: scan-artifact
 
-      - name: Czy wynik skanu jest na miejscu
+      - name: Złożenie katalogu site/
         run: |
-          if [ -f site/data/scan-results.json ]; then
-            mv site/data/scan-results.json site/data/latest-scan.json
-            echo "Wynik skanu dołączony do strony."
+          if [ -f scan-artifact/scan-results.json ]; then
+            python3 web/build_site.py site --scan scan-artifact/scan-results.json
           else
-            echo "Brak wyniku skanu — strona pokaże odnośnik do Actions."
+            python3 web/build_site.py site
           fi
-          rm -f site/data/scan-summary.md
-          find site -type f | sort
 
       # Złożona strona jako zwykły artefakt — do pobrania niezależnie od
       # tego, czy Pages jest już włączone.

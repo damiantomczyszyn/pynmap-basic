@@ -53,3 +53,5 @@ nmap-os-db
 
 # lokalny podglad strony (budowany ad-hoc, nie wchodzi do repo)
 _preview/
+web/node_modules/
+web/package-lock.json

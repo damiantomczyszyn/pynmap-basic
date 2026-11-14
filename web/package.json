@@ -1,0 +1,14 @@
+{
+  "name": "pynmap-basic-page-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Test strony end-to-end: prawdziwy index.html w jsdom z prawdziwym Pyodide",
+  "type": "module",
+  "scripts": {
+    "test": "node test_page.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^26.0.0",
+    "pyodide": "0.29.5"
+  }
+}

@@ -84,23 +84,24 @@ async function boot() {
   }
 
   try {
-    const sources = await Promise.all(
-      [...PKG_MODULES.map((m) => `pynmap/${m}.py`), "bridge.py"].map(
-        async (path) => {
-          const res = await fetch(path, { cache: "no-cache" });
-          if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
-          return [path, await res.text()];
-        }
-      )
-    );
+    // Źródła przychodzą z modules.js (generowanego przez web/build_site.py),
+    // nie przez fetch plików .py — część hostingów statycznych ich nie
+    // serwuje, a przy file:// fetch blokuje CORS.
+    const sources = window.PYNMAP_SOURCES;
+    if (!sources || typeof sources !== "object") {
+      throw new Error("brak window.PYNMAP_SOURCES — czy modules.js się wczytał?");
+    }
+
+    const missing = [...PKG_MODULES.map((m) => `pynmap/${m}.py`), "bridge.py"]
+      .filter((path) => typeof sources[path] !== "string");
+    if (missing.length) {
+      throw new Error(`modules.js nie zawiera: ${missing.join(", ")}`);
+    }
 
     pyodide.FS.mkdirTree(`${PY_ROOT}/pynmap`);
-    for (const [path, src] of sources) {
-      pyodide.FS.writeFile(`${PY_ROOT}/${path}`, src);
+    for (const [path, text] of Object.entries(sources)) {
+      pyodide.FS.writeFile(`${PY_ROOT}/${path}`, text);
     }
-    // Pakietowy __init__ celowo pusty: prawdziwy importuje scan_connect
-    // i scan_syn, które wymagają socketów.
-    pyodide.FS.writeFile(`${PY_ROOT}/pynmap/__init__.py`, "");
     bootStep(2, "1");
   } catch (err) {
     bootStep(2, "err");
