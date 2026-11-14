@@ -19,3 +19,21 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+NOTE ON NMAP
+
+This project is an independent, from-scratch reimplementation written for
+educational purposes. It reproduces *algorithms and constants* documented in
+Nmap's publicly available source code (RTT estimation, AIMD congestion
+control parameters, and the errno/ICMP-to-port-state decision tables), with
+references to the originating files and line numbers given in the source
+comments and in docs/.
+
+No Nmap source code has been copied into this repository, and no Nmap data
+files (such as nmap-services) are redistributed here.
+
+Nmap is distributed under the Nmap Public Source License (NPSL). See
+https://nmap.org/npsl/ for its terms. Nmap is a registered trademark of the
+Nmap Project; this project is not affiliated with or endorsed by it.

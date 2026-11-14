@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# Testy i narzędzia
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# C
+c_reference/connect_scan
+c_reference/*.o
+c_reference/*.dSYM/
+*.gcda
+*.gcno
+
+# Wyniki skanów — nie trzymamy ich w repo
+*.json
+*.gnmap
+*.nmap
+*.xml
+wynik*
+scan-*
+
+# Dane nmapa (objęte licencją NPSL) nie wchodzą do repo
+nmap-services
+nmap-service-probes
+nmap-os-db
+
+# Edytory i system
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
