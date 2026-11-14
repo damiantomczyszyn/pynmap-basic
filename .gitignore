@@ -50,3 +50,6 @@ nmap-os-db
 *.swo
 *~
 .DS_Store
+
+# lokalny podglad strony (budowany ad-hoc, nie wchodzi do repo)
+_preview/

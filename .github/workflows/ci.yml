@@ -245,21 +245,59 @@ jobs:
           rm -f site/data/scan-summary.md
           find site -type f | sort
 
-      # enablement: true włącza Pages przy pierwszym przebiegu, więc nie
-      # trzeba tego klikać w ustawieniach repo.
-      - uses: actions/configure-pages@v5
+      # Złożona strona jako zwykły artefakt — do pobrania niezależnie od
+      # tego, czy Pages jest już włączone.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: site
+          retention-days: 14
+
+      # enablement: true zadziała tylko, jeśli token ma prawa administratora
+      # repo; samo `pages: write` nie wystarcza do UTWORZENIA site'u.
+      # Dlatego krok jest nieblokujący, a brak Pages nie oblewa całego CI —
+      # to jednorazowa czynność w ustawieniach, nie błąd w kodzie.
+      - name: Konfiguracja Pages
+        id: cfg
+        continue-on-error: true
+        uses: actions/configure-pages@v5
         with:
           enablement: true
 
+      - name: Instrukcja, jeśli Pages nie jest włączone
+        if: steps.cfg.outcome != 'success'
+        run: |
+          {
+            echo "### Pages nie jest jeszcze włączone"
+            echo ""
+            echo "Strona została zbudowana i jest do pobrania jako artefakt"
+            echo "\`site\` z tego przebiegu, ale nie da się jej opublikować,"
+            echo "dopóki Pages nie zostanie włączone. Token workflow nie ma"
+            echo "do tego uprawnień — tworzenie site'u wymaga praw"
+            echo "administratora repozytorium."
+            echo ""
+            echo "Jednorazowo, w tym repo:"
+            echo ""
+            echo "1. **Settings → Pages**"
+            echo "2. **Build and deployment → Source: GitHub Actions**"
+            echo ""
+            echo "Następny push opublikuje stronę automatycznie."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Pages wyłączone — pomijam publikację (to nie błąd w kodzie)."
+
       - uses: actions/upload-pages-artifact@v3
+        if: steps.cfg.outcome == 'success'
         with:
           path: site
 
       - name: Deploy
         id: deploy
+        if: steps.cfg.outcome == 'success'
         uses: actions/deploy-pages@v4
 
       - name: Podsumowanie
+        if: steps.cfg.outcome == 'success'
         run: |
           {
             echo "### Strona opublikowana"
