@@ -187,6 +187,7 @@ docs/
   nmap-architecture.md   jak zbudowany jest kod nmapa, ścieżka wykonania
   c-vs-python.md         porównanie: wydajność, konstrukcje, wnioski
   port-states.md         tablice decyzyjne errno/flagi -> stan portu
+  rozszerzenia.md        plan dojścia do nmapa: tryby, fazy, koszty
 
 tests/                   185 testów (pytest)
 ```
@@ -270,6 +271,9 @@ uprawnień, więc `pytest` przechodzi też na zwykłym koncie.
 - wyjścia XML (`-oX`) — mamy JSON
 
 Pełna lista z uzasadnieniem: [`docs/c-vs-python.md`](docs/c-vs-python.md#4-czego-wersja-w-pythonie-nie-ma).
+
+Co z tego i w jakiej kolejności ma dojść — razem z kosztem każdego kroku
+i tym, co odblokowuje — opisuje [`docs/rozszerzenia.md`](docs/rozszerzenia.md).
 
 ---
 
