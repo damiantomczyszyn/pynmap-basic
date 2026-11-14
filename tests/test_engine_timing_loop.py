@@ -8,6 +8,8 @@ gdy nic nie leciało w powietrzu, a wysyłkę blokował tylko --scan-delay
 
 import time
 
+import pytest
+
 from pynmap.constants import ScanType
 from pynmap.engine import HostScanStats, Probe, ScanOptions, select_timeout
 from pynmap.targets import Target
@@ -58,7 +60,10 @@ def test_timeout_follows_soonest_probe():
     host.register_sent(
         Probe(port=80, tryno=0, sent_at=now, timeout_at=now + 0.03), now
     )
-    assert 0.0 < select_timeout([host], now) <= 0.03
+    # approx, bo (now + 0.03) - now nie wraca dokładnie jako 0.03:
+    # błąd zależy od rzędu wielkości time.monotonic(), więc ostre `<= 0.03`
+    # przechodzi lokalnie i oblewa na innej maszynie
+    assert select_timeout([host], now) == pytest.approx(0.03, abs=1e-6)
 
 
 def test_timeout_is_capped_for_host_timeout_responsiveness():
