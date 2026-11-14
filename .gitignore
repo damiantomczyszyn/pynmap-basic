@@ -27,13 +27,16 @@ c_reference/*.dSYM/
 *.gcda
 *.gcno
 
-# Wyniki skanów — nie trzymamy ich w repo
-*.json
+# Wyniki skanów — nie trzymamy ich w repo.
+# Uwaga: celowo bez '*.json', bo to wycinało .devcontainer/devcontainer.json.
+# Wzorce są wąskie i dotyczą tylko plików wyjściowych skanera.
 *.gnmap
 *.nmap
-*.xml
-wynik*
-scan-*
+scan-results.json
+scan-summary.md
+wynik*.json
+wynik*.txt
+scan-*.json
 
 # Dane nmapa (objęte licencją NPSL) nie wchodzą do repo
 nmap-services
