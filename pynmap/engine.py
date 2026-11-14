@@ -17,10 +17,16 @@ from __future__ import annotations
 
 import os
 import random
-import resource
 import time
 from collections import deque
 from dataclasses import dataclass, field
+
+try:
+    # Brak na Windowsie i w buildach WASM (Pyodide/Emscripten).
+    # Bez tego modułu limit deskryptorów bierzemy z wartości domyślnej.
+    import resource
+except ImportError:  # pragma: no cover - zależne od platformy
+    resource = None
 
 from .constants import (
     DEFAULT_MAX_SOCKETS,
@@ -354,6 +360,9 @@ def max_sockets_allowed() -> int:
     nmap czyta getrlimit(RLIMIT_NOFILE) i zostawia zapas (MAX_SOCKETS);
     robimy to samo, bo connect scan to głównie zarządzanie deskryptorami.
     """
+    if resource is None:
+        return DEFAULT_MAX_SOCKETS
+
     try:
         soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     except (ValueError, OSError):

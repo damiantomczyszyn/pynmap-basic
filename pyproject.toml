@@ -54,3 +54,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]
+# ci/ musi dopisać katalog repo do sys.path przed importem pynmap,
+# więc importy nie mogą być w jednym bloku na górze pliku
+"ci/*" = ["E402", "I001"]

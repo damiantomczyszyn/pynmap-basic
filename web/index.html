@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pynmap-basic — warstwa algorytmiczna w przeglądarce</title>
+<meta name="description" content="Estymator RTT, okno zatłoczenia i budowanie pakietów SYN z pynmap-basic, uruchomione w przeglądarce przez Pyodide.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper:     #E8EAEF;
+    --pane:      #F5F6F9;
+    --pane-2:    #FBFBFD;
+    --ink:       #16181F;
+    --ink-2:     #596072;
+    --ink-3:     #878DA0;
+    --rule:      #C6CAD4;
+    --rule-soft: #DCDFE7;
+    --ip-tint:   #E3EDE5;
+    --tcp-tint:  #DEE1F3;
+    --opt-tint:  #F0E7DA;
+    --open:      #1B6B40;
+    --closed:    #94392B;
+    --filtered:  #6A7080;
+    --accent:    #27408F;
+    --accent-dim:#D9DFF1;
+    --warn-bg:   #F6EFD9;
+    --warn-ink:  #7A5E0E;
+
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+    --s-1: 0.78rem;
+    --s0:  0.9rem;
+    --s1:  1rem;
+    --s2:  1.3rem;
+    --s3:  1.75rem;
+    --s4:  2.4rem;
+
+    --gap: 1.6rem;
+    --r: 2px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html { -webkit-text-size-adjust: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--s1);
+    line-height: 1.55;
+  }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:hover { text-decoration-thickness: 2px; }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* ---------- nagłówek ---------- */
+
+  .masthead {
+    border-bottom: 1px solid var(--rule);
+    background: var(--pane);
+  }
+
+  .masthead__inner {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 1.4rem 1.25rem 1.1rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem var(--gap);
+    align-items: baseline;
+    justify-content: space-between;
+  }
+
+  .wordmark {
+    font-family: var(--mono);
+    font-size: var(--s2);
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    margin: 0;
+  }
+
+  .wordmark span { color: var(--ink-3); font-weight: 400; }
+
+  .tagline {
+    margin: 0.2rem 0 0;
+    color: var(--ink-2);
+    font-size: var(--s0);
+    max-width: 52ch;
+  }
+
+  .env {
+    font-family: var(--mono);
+    font-size: var(--s-1);
+    color: var(--ink-2);
+    display: grid;
+    gap: 0.15rem;
+    justify-items: start;
+  }
+
+  .env b { font-weight: 500; color: var(--ink); }
+
+  /* ---------- układ ---------- */
+
+  main {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 1.25rem 4rem;
+  }
+
+  section { padding: 2.4rem 0 0; }
+
+  .sec-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1rem;
+    align-items: baseline;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 0.5rem;
+    margin-bottom: 1.2rem;
+  }
+
+  .sec-head h2 {
+    font-size: var(--s2);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0;
+  }
+
+  .sec-head p {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: var(--s0);
+    max-width: 62ch;
+  }
+
+  .ref {
+    font-family: var(--mono);
+    font-size: var(--s-1);
+    color: var(--ink-3);
+    margin-left: auto;
+    white-space: nowrap;
+  }
+
+  /* ---------- notka o ograniczeniu ---------- */
+
+  .limit {
+    background: var(--warn-bg);
+    color: var(--warn-ink);
+    border: 1px solid #E3D3A4;
+    border-radius: var(--r);
+    padding: 0.85rem 1rem;
+    font-size: var(--s0);
+    margin: 1.2rem 0 0;
+    max-width: 78ch;
+  }
+
+  .limit b { font-weight: 600; }
+
+  /* ---------- kontrolki ---------- */
+
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.9rem 1.2rem;
+    align-items: flex-end;
+    margin-bottom: 1.1rem;
+  }
+
+  .field { display: grid; gap: 0.25rem; }
+
+  .field > span {
+    font-size: var(--s-1);
+    color: var(--ink-2);
+  }
+
+  input[type="text"], input[type="number"], select {
+    font-family: var(--mono);
+    font-size: var(--s0);
+    color: var(--ink);
+    background: var(--pane-2);
+    border: 1px solid var(--rule);
+    border-radius: var(--r);
+    padding: 0.4rem 0.5rem;
+    min-width: 0;
+  }
+
+  input[type="text"].wide { width: min(100%, 30rem); }
+  input[type="number"] { width: 7.5rem; }
+
+  label.check {
+    display: inline-flex;
+    gap: 0.4rem;
+    align-items: center;
+    font-size: var(--s0);
+    color: var(--ink-2);
+  }
+
+  button {
+    font-family: var(--sans);
+    font-size: var(--s0);
+    font-weight: 500;
+    color: var(--pane-2);
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: var(--r);
+    padding: 0.45rem 0.9rem;
+    cursor: pointer;
+  }
+
+  button:hover { background: #1D3375; }
+  button.ghost { background: transparent; color: var(--accent); }
+  button.ghost:hover { background: var(--accent-dim); }
+  button[disabled] { opacity: 0.45; cursor: not-allowed; }
+
+  /* ---------- hex dump ---------- */
+
+  .packet-grid {
+    display: grid;
+    grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+    gap: var(--gap);
+    align-items: start;
+  }
+
+  @media (max-width: 860px) {
+    .packet-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  .hexdump {
+    font-family: var(--mono);
+    font-size: var(--s0);
+    background: var(--pane-2);
+    border: 1px solid var(--rule);
+    border-radius: var(--r);
+    padding: 0.8rem 0.9rem;
+    overflow-x: auto;
+    line-height: 1.75;
+  }
+
+  .hexrow { display: flex; gap: 1rem; white-space: pre; }
+  .hexrow__off { color: var(--ink-3); }
+  .hexrow__bytes > i { font-style: normal; padding: 0.1em 0.12em; border-radius: 1px; }
+  .hexrow__ascii { color: var(--ink-2); }
+
+  .b-ip  { background: var(--ip-tint); }
+  .b-tcp { background: var(--tcp-tint); }
+  .b-opt { background: var(--opt-tint); }
+  .b-hi  { outline: 1.5px solid var(--accent); background: var(--accent-dim) !important; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1rem;
+    font-family: var(--mono);
+    font-size: var(--s-1);
+    color: var(--ink-2);
+    margin-top: 0.6rem;
+  }
+
+  .legend i {
+    font-style: normal;
+    padding: 0.1em 0.45em;
+    border-radius: 1px;
+    border: 1px solid var(--rule-soft);
+  }
+
+  /* ---------- tabele ---------- */
+
+  table { width: 100%; border-collapse: collapse; font-size: var(--s0); }
+
+  thead th {
+    text-align: left;
+    font-weight: 500;
+    font-size: var(--s-1);
+    color: var(--ink-2);
+    border-bottom: 1px solid var(--rule);
+    padding: 0.3rem 0.5rem 0.35rem;
+    white-space: nowrap;
+  }
+
+  tbody td {
+    border-bottom: 1px solid var(--rule-soft);
+    padding: 0.3rem 0.5rem;
+    vertical-align: baseline;
+  }
+
+  tbody tr:hover { background: var(--accent-dim); }
+
+  .t-mono, td.num { font-family: var(--mono); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.note { color: var(--ink-2); font-size: var(--s-1); }
+
+  tr.g-ip  td:first-child { border-left: 3px solid #7FA98A; }
+  tr.g-tcp td:first-child { border-left: 3px solid #8891C9; }
+
+  .state-open     { color: var(--open);     font-weight: 600; }
+  .state-closed   { color: var(--closed);   font-weight: 500; }
+  .state-filtered { color: var(--filtered); font-weight: 500; }
+
+  .scroll-y { max-height: 22rem; overflow-y: auto; border-bottom: 1px solid var(--rule); }
+
+  /* ---------- wykresy ---------- */
+
+  .chart {
+    background: var(--pane-2);
+    border: 1px solid var(--rule);
+    border-radius: var(--r);
+    padding: 0.5rem;
+  }
+
+  .chart svg { display: block; width: 100%; height: auto; }
+
+  .chart-key {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 1.1rem;
+    font-family: var(--mono);
+    font-size: var(--s-1);
+    color: var(--ink-2);
+    margin-top: 0.5rem;
+  }
+
+  .chart-key b { font-weight: 500; }
+  .swatch { display: inline-block; width: 1.4em; height: 0.28em; vertical-align: 0.25em; }
+
+  .two-col {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+    gap: var(--gap);
+  }
+
+  .stack { display: grid; gap: 0.9rem; }
+
+  .err {
+    font-family: var(--mono);
+    font-size: var(--s0);
+    color: var(--closed);
+    background: #F7E9E6;
+    border: 1px solid #E0BDB6;
+    border-radius: var(--r);
+    padding: 0.5rem 0.7rem;
+  }
+
+  .meta {
+    font-family: var(--mono);
+    font-size: var(--s-1);
+    color: var(--ink-2);
+  }
+
+  /* ---------- ładowanie ---------- */
+
+  #boot {
+    font-family: var(--mono);
+    font-size: var(--s0);
+    color: var(--ink-2);
+    background: var(--pane);
+    border: 1px solid var(--rule);
+    border-radius: var(--r);
+    padding: 1rem 1.1rem;
+    margin-top: 2rem;
+  }
+
+  #boot ol { margin: 0.5rem 0 0; padding-left: 1.4rem; }
+  #boot li { margin: 0.1rem 0; }
+  #boot li[data-done="1"] { color: var(--open); }
+  #boot li[data-done="err"] { color: var(--closed); }
+
+  [hidden] { display: none !important; }
+
+  /* ---------- stopka ---------- */
+
+  footer {
+    border-top: 1px solid var(--rule);
+    background: var(--pane);
+    margin-top: 3rem;
+  }
+
+  .footer__inner {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 1.6rem 1.25rem 2.4rem;
+    display: grid;
+    gap: 0.8rem;
+    font-size: var(--s0);
+    color: var(--ink-2);
+  }
+
+  .footer__inner p { margin: 0; max-width: 72ch; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .hexrow__bytes > i { transition: background-color 90ms linear, outline-color 90ms linear; }
+  }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead__inner">
+    <div>
+      <h1 class="wordmark">pynmap-basic <span>/ warstwa algorytmiczna</span></h1>
+      <p class="tagline">
+        Estymator RTT, okno zatłoczenia i budowanie pakietów SYN z nmapa,
+        przepisane na Pythona i uruchomione tutaj przez Pyodide. Każda liczba
+        na tej stronie jest policzona przez ten sam kod, który skanuje w CI.
+      </p>
+    </div>
+    <div class="env" id="env" aria-live="polite">
+      <span>uruchamianie Pythona…</span>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <div id="boot">
+    <b>Ładowanie CPythona skompilowanego do WebAssembly</b> (~10 MB, jednorazowo)
+    <ol>
+      <li id="boot-1">pobieranie Pyodide</li>
+      <li id="boot-2">zapis modułów pynmap do wirtualnego systemu plików</li>
+      <li id="boot-3">import warstwy algorytmicznej</li>
+    </ol>
+  </div>
+
+  <div id="app" hidden>
+
+    <!-- ===================== PAKIET ===================== -->
+    <section id="packet">
+      <div class="sec-head">
+        <h2>Sonda SYN, bajt po bajcie</h2>
+        <span class="ref">pynmap/tcpip.py → nmap/tcpip.cc</span>
+      </div>
+      <p class="sec-head" style="border:0;margin-bottom:1rem;padding:0;">
+        To jest dokładnie ten pakiet, który <code>-sS</code> wysyła na mostek
+        docker0 w CI. Zmień port, a przeliczy się suma kontrolna TCP — bo liczy
+        się po pseudo-nagłówku, który nigdy nie trafia na kabel.
+        Najedź na wiersz tabeli, żeby podświetlić bajty.
+      </p>
+
+      <div class="controls">
+        <label class="field"><span>źródłowy IP</span>
+          <input type="text" id="p-src" value="192.168.1.50" size="15"></label>
+        <label class="field"><span>docelowy IP</span>
+          <input type="text" id="p-dst" value="192.168.1.1" size="15"></label>
+        <label class="field"><span>port źródłowy</span>
+          <input type="number" id="p-sport" value="44321" min="1" max="65535"></label>
+        <label class="field"><span>port docelowy</span>
+          <input type="number" id="p-dport" value="443" min="1" max="65535"></label>
+        <label class="field"><span>window</span>
+          <input type="number" id="p-window" value="1024" min="0" max="65535"></label>
+        <label class="field"><span>TTL</span>
+          <input type="number" id="p-ttl" value="64" min="1" max="255"></label>
+        <label class="check"><input type="checkbox" id="p-mss" checked> opcja MSS 1460</label>
+      </div>
+
+      <div id="p-err" class="err" hidden></div>
+
+      <div class="packet-grid">
+        <div>
+          <div class="hexdump" id="p-hex"></div>
+          <div class="legend">
+            <span><i class="b-ip">&nbsp;&nbsp;</i> nagłówek IP</span>
+            <span><i class="b-tcp">&nbsp;&nbsp;</i> nagłówek TCP</span>
+            <span><i class="b-opt">&nbsp;&nbsp;</i> opcje TCP</span>
+            <span id="p-meta" class="meta"></span>
+          </div>
+        </div>
+        <div class="scroll-y">
+          <table>
+            <thead><tr><th>pole</th><th>wartość</th><th>uwaga</th></tr></thead>
+            <tbody id="p-fields"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== RTT ===================== -->
+    <section id="rtt">
+      <div class="sec-head">
+        <h2>Estymator RTT</h2>
+        <span class="ref">pynmap/timing.py → nmap/timing.cc:99</span>
+      </div>
+      <p class="sec-head" style="border:0;margin-bottom:1rem;padding:0;">
+        Algorytm Jacobsona/Karelsa — ten sam, którym stos TCP wylicza RTO.
+        <code>timeout = srtt + 4·rttvar</code>. Wpisz pojedynczy skok opóźnienia
+        (np. <code>1800</code>) i zobacz, jak nmapowy sanity-check odrzuca
+        próbkę zamiast rozwalić estymatę.
+      </p>
+
+      <div class="controls">
+        <label class="field"><span>próbki RTT w ms, po przecinku</span>
+          <input type="text" id="r-samples" class="wide"
+                 value="200, 240, 180, 1800, 210, 205, 320, 290, 215, 208"></label>
+        <label class="field"><span>szablon</span>
+          <select id="r-template">
+            <option value="0">-T0 paranoid</option>
+            <option value="1">-T1 sneaky</option>
+            <option value="2">-T2 polite</option>
+            <option value="3" selected>-T3 normal</option>
+            <option value="4">-T4 aggressive</option>
+            <option value="5">-T5 insane</option>
+          </select></label>
+        <button id="r-run">Przelicz</button>
+        <button id="r-spike" class="ghost">Wstaw skok opóźnienia</button>
+      </div>
+
+      <div class="two-col">
+        <div>
+          <div class="chart" id="r-chart"></div>
+          <div class="chart-key">
+            <span><b><i class="swatch" style="background:#27408F"></i> srtt</b></span>
+            <span><b><i class="swatch" style="background:#1B6B40"></i> rttvar</b></span>
+            <span><b><i class="swatch" style="background:#94392B"></i> timeout</b></span>
+            <span><b><i class="swatch" style="background:#878DA0"></i> próbka</b></span>
+          </div>
+          <p class="meta" id="r-meta"></p>
+        </div>
+        <div class="scroll-y">
+          <table>
+            <thead><tr><th>#</th><th>próbka</th><th>srtt</th><th>rttvar</th><th>timeout</th></tr></thead>
+            <tbody id="r-steps"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== CWND ===================== -->
+    <section id="cwnd">
+      <div class="sec-head">
+        <h2>Okno zatłoczenia</h2>
+        <span class="ref">pynmap/timing.py → nmap/timing.cc:211</span>
+      </div>
+      <p class="sec-head" style="border:0;margin-bottom:1rem;padding:0;">
+        Ile sond może być jednocześnie „w powietrzu”. Rośnie liniowo w slow
+        start, potem o <code>ca_incr/cwnd</code> na RTT, a przy timeoucie
+        kolapsuje do 1 — dokładnie jak RTO w TCP. Kliknij przycisk, żeby wstawić
+        stratę i zobaczyć, jak <code>ssthresh</code> zapamiętuje, gdzie było za szybko.
+      </p>
+
+      <div class="controls">
+        <label class="field"><span>zdarzenia: a = odpowiedź, d = timeout hosta, g = timeout grupy</span>
+          <input type="text" id="c-events" class="wide"
+                 value="aaaaaaaaaaaaaaaaaaaadaaaaaaaaaagaaaaaaaaaa"></label>
+        <label class="field"><span>szablon</span>
+          <select id="c-template">
+            <option value="3" selected>-T3 normal</option>
+            <option value="4">-T4 aggressive</option>
+            <option value="5">-T5 insane</option>
+          </select></label>
+        <button id="c-run">Przelicz</button>
+        <button id="c-drop" class="ghost">Dodaj stratę</button>
+      </div>
+
+      <div class="two-col">
+        <div>
+          <div class="chart" id="c-chart"></div>
+          <div class="chart-key">
+            <span><b><i class="swatch" style="background:#27408F"></i> cwnd</b></span>
+            <span><b><i class="swatch" style="background:#94392B"></i> ssthresh</b></span>
+          </div>
+          <p class="meta" id="c-meta"></p>
+        </div>
+        <div class="scroll-y">
+          <table>
+            <thead><tr><th>#</th><th>zdarzenie</th><th>cwnd</th><th>ssthresh</th><th>faza</th></tr></thead>
+            <tbody id="c-steps"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== PARSERY ===================== -->
+    <section id="parse">
+      <div class="sec-head">
+        <h2>Parsery <code>-p</code> i celów</h2>
+        <span class="ref">pynmap/ports.py, pynmap/targets.py</span>
+      </div>
+
+      <div class="two-col">
+        <div class="stack">
+          <label class="field"><span>specyfikacja portów</span>
+            <input type="text" id="pp-spec" class="wide" value="22,80,443,8000-8010,redis"></label>
+          <p class="meta">Działa <code>-</code>, <code>1-1024</code>, <code>-1024</code>,
+            <code>8000-</code>, <code>T:80,U:53</code> i nazwy usług.</p>
+          <div id="pp-out"></div>
+        </div>
+        <div class="stack">
+          <label class="field"><span>specyfikacja celów</span>
+            <input type="text" id="tt-spec" class="wide" value="10.0.1-2.1-8"></label>
+          <p class="meta">Działa CIDR, zakresy w oktetach, listy i gwiazdka.
+            DNS nie — w przeglądarce nie ma socketów.</p>
+          <div id="tt-out"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== WYNIKI CI ===================== -->
+    <section id="ci">
+      <div class="sec-head">
+        <h2>Ostatni realny skan z CI</h2>
+        <span class="ref">.github/workflows/ci.yml</span>
+      </div>
+      <p class="sec-head" style="border:0;margin-bottom:1rem;padding:0;">
+        Tego nie da się zrobić w przeglądarce, więc robi to GitHub Actions:
+        stawia nginx i redis w kontenerach, skanuje je po IP mostka
+        <code>docker0</code> — czyli przez prawdziwy ARP, bridge i routing —
+        i publikuje wynik tutaj jako dane.
+      </p>
+      <div id="ci-out"><p class="meta">wczytywanie…</p></div>
+    </section>
+
+  </div>
+</main>
+
+<footer>
+  <div class="footer__inner">
+    <p>
+      <b>Czego ta strona nie robi:</b> nie skanuje. Przeglądarka nie udostępnia
+      socketów ani surowych pakietów, więc moduły <code>scan_connect</code>
+      i <code>scan_syn</code> nie są tu nawet importowane. Uruchomiona jest
+      wyłącznie warstwa algorytmiczna. Skanowanie dzieje się w CI i w Codespaces.
+    </p>
+    <p>
+      Kod: <a href="https://github.com/damiantomczyszyn/pynmap-basic">github.com/damiantomczyszyn/pynmap-basic</a>
+      · Pełny skaner odpalisz w przeglądarce przez Codespaces (<code>Code → Codespaces</code>),
+      gdzie są uprawnienia do raw socketów.
+    </p>
+    <p>
+      Projekt edukacyjny. Algorytmy i stałe odtworzone z publicznych źródeł
+      nmapa (NPSL) z odwołaniami do plików i linii; żaden kod nmapa nie został
+      skopiowany. Skanuj tylko to, co Twoje albo na co masz zgodę właściciela.
+    </p>
+  </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.29.5/full/pyodide.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

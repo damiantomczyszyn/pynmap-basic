@@ -26,6 +26,33 @@ pynmap-basic done: 1 IP address (1 host up) scanned in 0.00 seconds
 
 ---
 
+## Wypróbuj bez instalacji
+
+Trzy drogi, wszystkie darmowe, żadna nie wymaga klonowania repo:
+
+| Gdzie | Co dostajesz | Czego nie dostajesz |
+|---|---|---|
+| **[Demo w przeglądarce](https://damiantomczyszyn.github.io/pynmap-basic/)** | Estymator RTT, okno zatłoczenia i budowanie pakietów SYN, policzone przez ten sam kod przez Pyodide. Plus wynik ostatniego realnego skanu z CI. | Skanowania — przeglądarka nie ma socketów. |
+| **Codespaces** (`Code → Codespaces`) | Pełny skaner z `-sS` w terminalu w przeglądarce. Kontener ma `NET_RAW`, zbudowaną wersję C i nmapa do porównań. | Nic — to zwykły Linux. 120 core-godzin/mies. na koncie Free. |
+| **[GitHub Actions](https://github.com/damiantomczyszyn/pynmap-basic/actions)** | Realny skan nginxa i redisa w kontenerach, po IP mostka `docker0`. | Interaktywności — odpala się na push. |
+
+Dlaczego taki podział, a nie jeden hosting: skanera portów nie da się
+uruchomić na darmowym PaaS-ie. Brakuje `CAP_NET_RAW`, a skanowanie
+z infrastruktury dostawcy łamie regulamin. Szczegóły i mapa darmowych
+tierów: [`docs/darmowy-hosting.md`](docs/darmowy-hosting.md).
+
+### Co weryfikuje CI
+
+Na każdy push: `ruff`, `pytest` na Pythonie 3.10 i 3.13, testy jako root
+(włączają przypadki `-sS` na surowych socketach), build wersji C pod
+`-Wall -Wextra -Wpedantic` z zerową tolerancją na ostrzeżenia, przebieg pod
+AddressSanitizerem, a potem **realny test sieciowy**: nginx i redis stawiane
+w kontenerach i skanowane po IP mostka — czyli przez prawdziwy ARP, bridge
+i routing jądra, nie skrótem przez loopback. Build pada, jeśli
+którykolwiek port wyjdzie w innym stanie niż oczekiwany.
+
+---
+
 ## ⚠️ Zanim uruchomisz
 
 **Skanuj wyłącznie hosty, których jesteś właścicielem albo na które masz
