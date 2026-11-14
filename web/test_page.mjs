@@ -119,13 +119,35 @@ console.log("\n=== parsery ===");
 ok($("pp-out").textContent.includes("portow") || $("pp-out").textContent.includes("portów"), `porty: "${$("pp-out").textContent.slice(0,40)}"`);
 ok($("tt-out").textContent.includes("10.0.1.1"), "cele rozwiniete");
 
-console.log("\n=== wyniki realnego skanu z CI ===");
+// Sekcja wyników skanu ma dwa prawidłowe stany: z danymi (gdy build_site
+// dostał --scan) i bez nich (gdy strona budowana jest samodzielnie, np.
+// w jobie testowym). Oba są user-facing, więc testujemy ten, który zachodzi.
+const hasScanData = (() => {
+  try { readFileSync(`${SITE}/data/latest-scan.json`, "utf8"); return true; }
+  catch { return false; }
+})();
+
+console.log(`\n=== wyniki skanu z CI (dane ${hasScanData ? "obecne" : "nieobecne"}) ===`);
 const ciText = $("ci-out").textContent;
-ok(ciText.includes("172.17.0.2"), "IP kontenera nginx obecne");
-ok(ciText.includes("172.17.0.3"), "IP kontenera redis obecne");
-ok(ciText.includes("open"), "stan open obecny");
-ok($("ci-out").querySelectorAll("table").length === 2, `tabel skanu: ${$("ci-out").querySelectorAll("table").length} (-sT i -sS)`);
-ok($("ci-out").querySelectorAll(".state-open").length === 4, `portow open: ${$("ci-out").querySelectorAll(".state-open").length} (2 skany x 2 porty)`);
+
+if (hasScanData) {
+  const scan = JSON.parse(readFileSync(`${SITE}/data/latest-scan.json`, "utf8"));
+  const hosts = [...new Set(scan.scans.flatMap((s) => s.rows.map((r) => r.host)))];
+  const openCount = scan.scans.flatMap((s) => s.rows).filter((r) => r.state === "open").length;
+
+  for (const host of hosts) {
+    ok(ciText.includes(host), `IP celu ${host} obecne`);
+  }
+  ok($("ci-out").querySelectorAll("table").length === scan.scans.length,
+     `tabel skanu: ${$("ci-out").querySelectorAll("table").length} (oczekiwano ${scan.scans.length})`);
+  ok($("ci-out").querySelectorAll(".state-open").length === openCount,
+     `portow open: ${$("ci-out").querySelectorAll(".state-open").length} (oczekiwano ${openCount})`);
+} else {
+  ok($("ci-out").querySelectorAll("table").length === 0, "brak tabel, zgodnie z brakiem danych");
+  ok(/Brak zapisanego wyniku|Actions/.test(ciText),
+     `komunikat zastępczy obecny: "${ciText.trim().slice(0, 60)}"`);
+  ok(!!$("ci-out").querySelector('a[href*="actions"]'), "odnosnik do Actions obecny");
+}
 
 console.log("\n=== bledy konsoli ===");
 const real = logs.filter(([k, m]) => k !== "warn" && !String(m).includes("Could not parse CSS"));
