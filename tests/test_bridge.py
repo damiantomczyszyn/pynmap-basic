@@ -8,15 +8,9 @@ wyglądającą bzdurę, co jest groźniejsze niż czysty błąd.
 """
 
 import json
-import sys
-from pathlib import Path
 
+import bridge
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "web"))
-
-import bridge  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Rozpoznawanie, czy specyfikacja wymaga DNS
@@ -86,7 +80,7 @@ def test_build_packet_is_byte_stable():
     Te same wejścia muszą dać ten sam pakiet — inaczej demo w przeglądarce
     i skan w CI nie byłyby porównywalne.
     """
-    args = dict(src="10.0.0.5", dst="10.0.0.9", sport=40000, dport=80, seq=1)
+    args = {"src": "10.0.0.5", "dst": "10.0.0.9", "sport": 40000, "dport": 80, "seq": 1}
     assert bridge.build_packet(**args)["hex"] == bridge.build_packet(**args)["hex"]
 
 
