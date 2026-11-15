@@ -39,38 +39,136 @@ def section(title: str) -> None:
     print(f"--- {title} ---")
 
 
-def closed_port_errno() -> None:
-    """Co connect() zwraca dla portu, na którym nikt nie nasłuchuje."""
-    section("connect() na zamknięty port localhost")
+def _probe_connect(host: str, port: int, label: str) -> None:
+    """
+    Pelny przebieg nieblokujacego connect(), z zapisem KAZDEGO kroku.
 
-    # port zajęty i natychmiast zwolniony => prawie pewnie nikt nie nasłuchuje
-    probe = socket.socket()
-    probe.bind(("127.0.0.1", 0))
-    port = probe.getsockname()[1]
-    probe.close()
+    Poprzednia wersja ignorowala to, czy select() w ogole sie odezwal,
+    i czytala SO_ERROR bezwarunkowo — wiec "SO_ERROR 0" moglo znaczyc
+    albo "polaczenie nawiazane", albo "nic sie jeszcze nie stalo".
+    Te dwa przypadki trzeba rozdzielic: pierwszy to port otwarty,
+    drugi nie znaczy nic.
+    """
+    section(f"connect() -> {label} ({host}:{port})")
 
     sock = socket.socket()
     sock.setblocking(False)
-    code = sock.connect_ex(("127.0.0.1", port))
-    line("connect_ex() -> ", code)
-    if code in (0, errno.EINPROGRESS, getattr(errno, "EWOULDBLOCK", -1), 10035, 10036):
-        # nieblokujące connect bywa „w toku” — dociągamy wynik przez SO_ERROR
+    code = sock.connect_ex((host, port))
+    line("connect_ex()", code)
+
+    if code != 0:
         sel = selectors.DefaultSelector()
         sel.register(sock, selectors.EVENT_WRITE)
-        sel.select(2.0)
-        code = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+        fired = []
+        for _ in range(20):          # petla, bo jedno select() moze wrocic puste
+            fired = sel.select(0.25)
+            if fired:
+                break
         sel.close()
-        line("SO_ERROR po gotowości -> ", code)
+        line("select() odezwal sie?", bool(fired))
+        if not fired:
+            line("WNIOSEK", "select() NIE zasygnalizowal gotowosci w 5 s")
+            sock.close()
+            return
+
+    err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+    line("SO_ERROR (1. czytanie)", err)
+    line("SO_ERROR (2. czytanie)", sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR))
+
+    try:
+        line("getpeername()", sock.getpeername())
+        established = True
+    except OSError as exc:
+        line("getpeername()", f"OSError errno={exc.errno} "
+                              f"winerror={getattr(exc, 'winerror', None)}: {exc.strerror}")
+        established = False
+
+    line("POLACZENIE ISTNIEJE?", established)
+    if err == 0 and not established:
+        print("  => TO JEST TEN PRZYPADEK: SO_ERROR mowi 0, a polaczenia NIE MA.")
+        print("     Bez sprawdzenia getpeername() port bylby zaraportowany jako OPEN.")
     sock.close()
 
-    line("errno.ECONNREFUSED (POSIX)", errno.ECONNREFUSED)
-    line("WSAECONNREFUSED (Winsock)", 10061)
-    if code == 10061:
-        print("  => kody Winsock: tabela errno MUSI je znać")
-    elif code == errno.ECONNREFUSED:
-        print("  => kody POSIX")
-    else:
-        print(f"  => NIEOCZEKIWANY kod {code} — to jest ta informacja, której szukam")
+
+def closed_port_errno() -> None:
+    """Co connect() zwraca dla portu zamknietego, a co dla otwartego."""
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    closed = probe.getsockname()[1]
+    probe.close()
+    _probe_connect("127.0.0.1", closed, "port ZAMKNIETY")
+
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    try:
+        _probe_connect("127.0.0.1", srv.getsockname()[1], "port OTWARTY")
+    finally:
+        srv.close()
+
+    section("wartosci stalych errno na tej platformie")
+    for name in ("ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH",
+                 "EACCES", "EPERM", "EISCONN", "EAGAIN", "EWOULDBLOCK",
+                 "EINPROGRESS", "EALREADY", "ENOTCONN"):
+        line(f"errno.{name}", getattr(errno, name, "brak"))
+    print("  (na Windowsie Python aliasuje te nazwy na WARTOSCI Winsock,")
+    print("   np. ECONNREFUSED == 10061, a nie POSIX-owe 111)")
+
+
+def scanner_sanity_check() -> None:
+    """
+    Najwazniejszy test: czy pynmap zgadza sie z rzeczywistoscia.
+
+    Stawia wlasny listener i skanuje go razem z portem zamknietym. Jesli
+    ktorykolwiek wiersz sie nie zgadza, wynik skanera na tej platformie jest
+    nieprawdziwy — i to jest informacja, po ktora ten skrypt istnieje.
+    """
+    section("pynmap -sT kontra rzeczywistosc")
+
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    open_port = srv.getsockname()[1]
+
+    tmp = socket.socket()
+    tmp.bind(("127.0.0.1", 0))
+    closed_port = tmp.getsockname()[1]
+    tmp.close()
+
+    try:
+        from pynmap.engine import ScanOptions
+        from pynmap.scan_connect import connect_scan
+        from pynmap.targets import Target
+        from pynmap.timing import TIMING_TEMPLATES
+
+        opts = ScanOptions(
+            ports=[open_port, closed_port],
+            timing=TIMING_TEMPLATES[4],
+            randomize_ports=False,
+            resolve_dns=False,
+            max_retries=1,
+        )
+        report = connect_scan([Target(ip="127.0.0.1")], opts)[0]
+    except Exception as exc:  # noqa: BLE001 - diagnostyka nie moze sie wywalic
+        line("BLAD", f"{type(exc).__name__}: {exc}")
+        srv.close()
+        return
+    finally:
+        srv.close()
+
+    ok = True
+    for port, expected in ((open_port, "open"), (closed_port, "closed")):
+        entry = report.portlist.get(port)
+        got = str(entry.state)
+        if got != expected:
+            ok = False
+        line(f"{'OK ' if got == expected else 'ZLE'} port {port}",
+             f"oczekiwano {expected}, dostano {got} "
+             f"({entry.reason}, rtt={entry.rtt_us})")
+    print("  => skaner zgadza sie z rzeczywistoscia" if ok
+          else "  => SKANER KLAMIE na tej platformie")
 
 
 def raw_socket_support() -> None:
@@ -142,6 +240,7 @@ def main() -> int:
         line("os.uname()", "niedostepne (Windows)")
 
     closed_port_errno()
+    scanner_sanity_check()
     raw_socket_support()
     selector_and_limits()
     struct_layouts()
