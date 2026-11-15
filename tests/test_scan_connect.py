@@ -323,6 +323,13 @@ def test_unsupported_address_family_skips_host_not_scan(monkeypatch):
     assert skipped.host_up is False
     assert skipped.skip_reason is not None
     assert "AF_INET6" in skipped.skip_reason
+    # Czesc (b) poprawki: _finish_host() NIE wola finalize() dla pominietego
+    # hosta. Bez tych asercji neutralizacja straznika `host.skip_reason is
+    # None` przechodzila cala suite, a host, dla ktorego nie powstalo ani
+    # jedno gniazdo, dostawal w raporcie widmowe porty filtered/no-response.
+    assert skipped.probes_sent == 0
+    assert skipped.portlist.results == {}
+    assert skipped.portlist.count_by_state() == {}
 
     # cel IPv4 w tym samym przebiegu musi zostać przeskanowany
     scanned = by_ip["127.0.0.1"]
@@ -330,8 +337,23 @@ def test_unsupported_address_family_skips_host_not_scan(monkeypatch):
     assert scanned.portlist.get(80).state is not PortState.UNKNOWN
 
 
-def test_fd_exhaustion_requeues_port_instead_of_skipping(monkeypatch):
-    """EMFILE dotyczy chwili, nie hosta — port musi wrócić do kolejki."""
+def test_fd_exhaustion_requeues_port_instead_of_skipping(monkeypatch, closed_port):
+    """
+    EMFILE dotyczy chwili, nie hosta — port musi wrocic do kolejki I ZOSTAC
+    FAKTYCZNIE ZBADANY.
+
+    Poprzednia asercja (`get(port).state is not PortState.UNKNOWN`) byla
+    TAUTOLOGIA, i to szersza, niz wygladalo: `portlist.get(p).state` nie moze
+    byc UNKNOWN dla ZADNEGO portu w zadnym raporcie z connect_scan(), bo albo
+    finalize() wpisuje stan domyslny (FILTERED) wprost do results, albo
+    fallback get() zwraca ten sam default. Test przechodzil wiec takze wtedy,
+    gdy port zostal ZGUBIONY: po usunieciu `ports_todo.appendleft(port)`
+    z galezi EMFILE wychodzilo probes_sent = 0 i falszywe
+    'filtered / no-response' zamiast 'closed / conn-refused'.
+
+    Rozrozniajacym polem jest rtt_us: ustawia je WYLACZNIE register_reply(),
+    czyli prawdziwa odpowiedz. finalize() go nie dotyka.
+    """
     real_socket = socket.socket
     calls = {"n": 0}
 
@@ -344,7 +366,7 @@ def test_fd_exhaustion_requeues_port_instead_of_skipping(monkeypatch):
     monkeypatch.setattr(socket, "socket", flaky_socket)
 
     opts = ScanOptions(
-        ports=[80],
+        ports=[closed_port],
         timing=TIMING_TEMPLATES[4],
         randomize_ports=False,
         resolve_dns=False,
@@ -354,7 +376,13 @@ def test_fd_exhaustion_requeues_port_instead_of_skipping(monkeypatch):
 
     assert report.host_up is True
     assert report.skip_reason is None
-    assert report.portlist.get(80).state is not PortState.UNKNOWN
+    assert calls["n"] == 2, "port nie wrocil do kolejki — socket() wolany raz"
+    assert report.probes_sent == 1
+
+    entry = report.portlist.get(closed_port)
+    assert entry.rtt_us is not None, "stan dopisany przez finalize(), nie zmierzony"
+    assert entry.state is PortState.CLOSED
+    assert entry.reason is Reason.CONREFUSED
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +563,10 @@ def test_single_fd_failure_still_only_requeues(monkeypatch):
     report = connect_scan([Target(ip="127.0.0.1")], opts)[0]
     assert report.skip_reason is None
     assert report.host_up is True
-    assert 80 in report.portlist.results
+    # `80 in results` bylo tautologia: finalize() wpisuje KAZDY zamowiony port.
+    # rtt_us ustawia wylacznie register_reply(), wiec tylko ono dowodzi pomiaru.
+    assert report.portlist.get(80).rtt_us is not None
+    assert report.probes_sent == 1
 
 
 # ---------------------------------------------------------------------------
