@@ -168,12 +168,19 @@ class HostScanStats:
         )
 
         self.start_time = now
-        self.last_probe_sent = 0.0
+        # None, a NIE 0.0: 0.0 jest poprawnym punktem na skali time.monotonic()
+        # (czyli chwila bootu), wiec na swiezo wystartowanej maszynie wyrazenie
+        # last_probe_sent + scan_delay wypadalo w PRZYSZLOSCI i pierwsza sonda
+        # byla wstrzymywana o (scan_delay - uptime) sekund.
+        self.last_probe_sent: float | None = None
         self.probes_sent = 0
         self.replies_received = 0
         self.timed_out = False
         # ustawiane przez SYN scan (adres źródłowy wybrany dla tej trasy)
         self.source_ip: str | None = None
+        # powód pominięcia hosta (np. brak IPv6 w jądrze) — gdy jest
+        # ustawiony, host nie trafia do raportu jako przeskanowany
+        self.skip_reason: str | None = None
 
     # -- zapytania o stan ---------------------------------------------------
 
@@ -217,10 +224,24 @@ class HostScanStats:
             return False
 
         delay = self.opts.effective_scan_delay_s()
-        if delay > 0:
+        if delay > 0 and self.last_probe_sent is not None:
             return (now - self.last_probe_sent) >= delay
 
         return True
+
+    def next_send_allowed_at(self) -> float:
+        """
+        Najwcześniejszy moment, w którym wolno wysłać kolejną sondę.
+
+        Liczy się tylko --scan-delay; 0.0 znaczy "od razu". Pętla główna
+        używa tego, żeby PRZESPAĆ przerwę między sondami. Bez tego, gdy nic
+        nie leciało, select() dostawał timeout 0 i pętla kręciła się na
+        100% CPU przez całą przerwę (przy -T0 to 300 s na sondę).
+        """
+        delay = self.opts.effective_scan_delay_s()
+        if delay <= 0 or self.last_probe_sent is None:
+            return 0.0
+        return self.last_probe_sent + delay
 
     def next_port(self) -> int | None:
         """
@@ -237,11 +258,19 @@ class HostScanStats:
 
     # -- rejestracja zdarzeń ------------------------------------------------
 
-    def register_sent(self, probe: Probe, now: float) -> None:
+    def register_sent(
+        self, probe: Probe, now: float, group: UltraTimingVals | None = None
+    ) -> None:
         self.outstanding[probe.key] = probe
         self.last_probe_sent = now
         self.probes_sent += 1
         self.timing.num_replies_expected += 1
+        # Grupowe okno ma własne liczniki i też musi je dostać. Bez tego
+        # num_replies_expected zostawało 0, cc_scale() zwracało 0.0, a ack()
+        # mnożyło przyrost przez zero — grupowe cwnd nigdy nie rosło, więc
+        # bramka oparta na nim była stałym sufitem, a nie okienkiem AIMD.
+        if group is not None:
+            group.num_replies_expected += 1
 
     def register_reply(
         self,
@@ -330,6 +359,7 @@ class HostReport:
     replies_received: int
     timed_out: bool = False
     host_up: bool = True
+    skip_reason: str | None = None
 
     def interesting(self, only_open: bool) -> list:
         results = self.portlist.sorted_results()
@@ -351,6 +381,47 @@ class ScanReport:
 # ---------------------------------------------------------------------------
 # Pomocnicze
 # ---------------------------------------------------------------------------
+
+
+def select_timeout(
+    hosts: list[HostScanStats], now: float, max_wait: float = 0.1
+) -> float:
+    """
+    Jak długo wolno czekać w select()/poll() — wspólne dla -sT i -sS.
+
+    Trzy przypadki:
+      * są sondy w powietrzu  -> do najbliższego timeoutu sondy,
+      * nic nie leci, ale host czeka na --scan-delay -> do końca przerwy,
+      * nic nie leci i wolno wysyłać -> 0, bo pętla zaraz wyśle sondę.
+
+    Wszystko przyciśnięte do max_wait, żeby --host-timeout pozostał
+    responsywny.
+    """
+    soonest: float | None = None
+    for host in hosts:
+        for probe in host.outstanding.values():
+            if soonest is None or probe.timeout_at < soonest:
+                soonest = probe.timeout_at
+
+    if soonest is not None:
+        return max(0.0, min(soonest - now, max_wait))
+
+    waiting = [host for host in hosts if host.work_left() and not host.timed_out]
+    if not waiting:
+        return 0.01
+
+    earliest = min(host.next_send_allowed_at() for host in waiting)
+    if earliest > now:
+        return max(0.0, min(earliest - now, max_wait))
+
+    # Zegar mówi "można wysyłać", ale to jeszcze nie znaczy, że ktokolwiek
+    # faktycznie może: okno zatłoczenia też musi przepuścić. Zwrócenie tu 0.0
+    # bez tego sprawdzenia zamieniało zablokowane okno w pętlę na 100% CPU
+    # bez żadnego wyjścia (np. --min-parallelism -1 --max-parallelism -1
+    # daje cwnd = -1, czyli send_ok() na zawsze False).
+    if any(host.send_ok(now) for host in waiting):
+        return 0.0
+    return max_wait
 
 
 def max_sockets_allowed() -> int:

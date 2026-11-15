@@ -195,7 +195,10 @@ class ScanPerformanceVars:
         min_parallelism: int = 0,
         max_parallelism: int = 0,
     ) -> ScanPerformanceVars:
-        low_cwnd = min_parallelism if min_parallelism else 1
+        # max(1, ...) to obrona w głębi: pynmap.* jest też importowalnym
+        # pakietem, a cwnd <= 0 oznacza send_ok() na zawsze False, czyli
+        # pętlę skanowania, która nigdy nic nie wyśle.
+        low_cwnd = max(1, min_parallelism) if min_parallelism else 1
         effective_max = max_parallelism or tmpl.max_parallelism
         max_cwnd = max(low_cwnd, effective_max if effective_max else 300)
         initial = int(_box(low_cwnd, max_cwnd, 10))
