@@ -24,7 +24,11 @@ def _host(ports, now, **kwargs):
         randomize_ports=False,
         **kwargs,
     )
-    return HostScanStats(Target(ip="192.0.2.1"), opts, opts.build_perf(), now=now)
+    perf = opts.build_perf()
+    host = HostScanStats(Target(ip="192.0.2.1"), opts, perf, now=now)
+    # scannery buduje sie z (opts, perf), a testy delegacji dostaja tylko hosta
+    host.perf = perf
+    return host
 
 
 # ---------------------------------------------------------------------------
@@ -206,3 +210,98 @@ def test_negative_parallelism_cannot_produce_dead_window():
     perf = opts.build_perf()
     assert perf.low_cwnd >= 1
     assert perf.max_cwnd >= perf.low_cwnd
+
+
+# ---------------------------------------------------------------------------
+# Oba silniki MUSZA delegowac do helpera
+# ---------------------------------------------------------------------------
+#
+# Testy powyzej sprawdzaja wylacznie modulowy select_timeout(). Stara, zepsuta
+# implementacja nigdy w engine.py nie zyla — zyla w scan_connect._select_timeout
+# i scan_syn._select_timeout, a te dwa miejsca nie mialy ZADNEGO pokrycia:
+# podmiana obu na `return 0.0` przechodzila cala suite (311 passed), palac przy
+# tym 99,5% rdzenia przez cala przerwe miedzy sondami. Ponizsze testy zamykaja
+# ta luke, mrozac zegar, zeby nie scigac sie z czasem.
+
+
+def _frozen(monkeypatch, value):
+    monkeypatch.setattr(time, "monotonic", lambda: value)
+    return value
+
+
+def _host_waiting_on_scan_delay(now, delay=5.0):
+    """Nic nie leci, wysylke blokuje wylacznie --scan-delay."""
+    host = _host([80, 443], now, scan_delay_s=delay)
+    host.register_sent(
+        Probe(port=80, tryno=0, sent_at=now, timeout_at=now + 1.0), now
+    )
+    host.outstanding.clear()
+    return host
+
+
+def _host_with_probe_in_flight(now, ttl=0.04):
+    host = _host([80, 443], now)
+    host.register_sent(
+        Probe(port=80, tryno=0, sent_at=now, timeout_at=now + ttl), now
+    )
+    return host
+
+
+def _connect_scanner(opts_host):
+    from pynmap.scan_connect import ConnectScanner
+
+    return ConnectScanner(opts_host.opts, opts_host.perf)
+
+
+def _syn_scanner(opts_host):
+    from pynmap.scan_syn import SynScanner
+
+    return SynScanner(opts_host.opts, opts_host.perf)
+
+
+@pytest.mark.parametrize("make_scanner", [_connect_scanner, _syn_scanner])
+@pytest.mark.parametrize(
+    "make_host", [_host_waiting_on_scan_delay, _host_with_probe_in_flight]
+)
+def test_engine_select_timeout_matches_helper(monkeypatch, make_scanner, make_host):
+    """
+    _select_timeout() kazdego silnika musi zwracac DOKLADNIE to, co helper.
+
+    Zamrozony zegar sprawia, ze oba wyliczenia widza ten sam `now`, wiec
+    porownanie jest scisle, a nie przybliżone.
+    """
+    now = 10_000.0
+    host = make_host(now)
+    scanner = make_scanner(host)
+    _frozen(monkeypatch, now)
+
+    expected = select_timeout([host], now)
+    assert expected > 0.0, "test musi badac stan, w ktorym helper NIE zwraca 0"
+    assert scanner._select_timeout([host]) == expected
+
+
+@pytest.mark.parametrize("make_scanner", [_connect_scanner, _syn_scanner])
+def test_engine_select_timeout_is_not_hardcoded_zero(monkeypatch, make_scanner):
+    """
+    Wprost: w stanie "czekamy na --scan-delay" zaden silnik nie moze zwrocic 0.
+
+    Zwrocenie 0 oznacza select() bez uspienia, czyli petle na 100% CPU przez
+    cala przerwe — przy -T0 to 300 s na sonde.
+    """
+    now = 10_000.0
+    host = _host_waiting_on_scan_delay(now)
+    scanner = make_scanner(host)
+    _frozen(monkeypatch, now)
+
+    assert scanner._select_timeout([host]) > 0.0
+
+
+@pytest.mark.parametrize("make_scanner", [_connect_scanner, _syn_scanner])
+def test_engine_select_timeout_is_zero_when_ready(monkeypatch, make_scanner):
+    """Kontrola: gdy wolno wysylac, 0 jest poprawne i nie wolno tego zwalniac."""
+    now = 10_000.0
+    host = _host([80, 443], now)
+    scanner = make_scanner(host)
+    _frozen(monkeypatch, now)
+
+    assert scanner._select_timeout([host]) == 0.0

@@ -213,7 +213,7 @@ docs/
   port-states.md         tablice decyzyjne errno/flagi -> stan portu
   rozszerzenia.md        plan dojścia do nmapa: tryby, fazy, koszty
 
-tests/                   311 testów (pytest)
+tests/                   319 testów (pytest)
 ```
 
 ---
@@ -256,7 +256,7 @@ pip install pytest
 python3 -m pytest tests/ -v
 ```
 
-311 testów. Pokrywają m.in.:
+319 testów. Pokrywają m.in.:
 
 - zgodność estymatora RTT z wzorami z `timing.cc` (łącznie z zachowaniem
   przesunięć bitowych na liczbach ujemnych),
@@ -270,7 +270,9 @@ python3 -m pytest tests/ -v
 - retransmisje: ponawianie do limitu, potem `filtered`,
 - skan end-to-end na prawdziwym listenerze lokalnym,
 - zwijanie stanów w wyjściu (`Not shown:`) wraz z regresją wydajnościową,
-- czekanie na `--scan-delay` bez kręcenia się na 100% CPU,
+- czekanie na `--scan-delay` bez kręcenia się na 100% CPU — w helperze
+  **oraz** w obu silnikach, bo testowanie mutacyjne pokazało, że sama
+  delegacja nie miała pokrycia,
 - pominięcie hosta, gdy `socket()` zawiedzie (np. wyłączony IPv6),
 - warstwę CLI: `-p ""`, `--top-ports 0` i ujemne `--min/--max-parallelism`
   muszą być błędem, a nie cichym skanem domyślnych 100 portów albo pętlą
