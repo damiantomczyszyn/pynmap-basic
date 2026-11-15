@@ -394,6 +394,14 @@ Rzeczy, które nie dodają trybów, ale zmieniają to, ile można kodowi zaufać
   RTT ze wszystkich portów; nmap podaje RTT z fazy wykrywania hosta.
   Po Fazie 1 warto to poprawić — teraz przy `-p -` liczba jest zdominowana
   przez porty zamknięte.
+- ~~**Jedna fala timeoutów dzieli okno N razy.**~~ Naprawione: `last_drop`
+  jest wreszcie **czytane** (`_already_dropped()`), więc fala strat zwija
+  okno raz, jak w TCP i w nmapie. Sentinel to `-inf`, nie `now` — ta sama
+  pułapka co przy `last_probe_sent`: bieżąca chwila znaczyłaby „właśnie
+  zmniejszono okno" i wyciszyłaby pierwszą reakcję.
+- ~~**Okno rozdawane zawsze od `hosts[0]`.**~~ Naprawione: trwały kursor
+  round-robin (`_next_host_idx`), odpowiednik `UltraScanInfo::nextI`.
+  Rozrzut liczby sond na 20 hostach spadł z 12,7× do 2,1×.
 - **Okno grupowe a sondy rozstrzygnięte natychmiast.** W `-sT` sondy,
   które `connect()` rozstrzyga od razu (localhost, RST), nie wchodzą do
   `_pending`, więc nie podlegają bramce grupowego cwnd. Na szybkich celach

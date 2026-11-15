@@ -213,7 +213,7 @@ docs/
   port-states.md         tablice decyzyjne errno/flagi -> stan portu
   rozszerzenia.md        plan dojścia do nmapa: tryby, fazy, koszty
 
-tests/                   319 testów (pytest)
+tests/                   341 testów (pytest)
 ```
 
 ---
@@ -256,7 +256,7 @@ pip install pytest
 python3 -m pytest tests/ -v
 ```
 
-319 testów. Pokrywają m.in.:
+341 testów. Pokrywają m.in.:
 
 - zgodność estymatora RTT z wzorami z `timing.cc` (łącznie z zachowaniem
   przesunięć bitowych na liczbach ujemnych),
@@ -278,7 +278,10 @@ python3 -m pytest tests/ -v
   muszą być błędem, a nie cichym skanem domyślnych 100 portów albo pętlą
   bez wyjścia,
 - że `--host-timeout` nie dopisuje wymyślonych stanów portom, do których
-  nie poszła żadna sonda,
+  nie poszła żadna sonda — ale też że **nie gubi** tych, które zmierzył,
+- że jedna fala timeoutów zwija okno zatłoczenia raz, a nie raz na sondę,
+- że grupowe okno jest rozdawane po hostach rotacyjnie, a nie zawsze od
+  pierwszego z listy,
 - że grupowe okno zatłoczenia faktycznie rośnie, a nie stoi na wartości
   początkowej,
 - że prefiks protokołu w `-p` jest „lepki" (`U:53,80` to dwa porty UDP, jak

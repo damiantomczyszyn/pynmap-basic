@@ -5,6 +5,7 @@ Testy wymagające surowych socketów są pomijane bez CAP_NET_RAW, żeby
 `pytest` przechodził też na zwykłym koncie użytkownika.
 """
 
+import errno
 import socket
 import struct
 import threading
@@ -478,3 +479,207 @@ def test_max_parallelism_one_is_really_serial():
     assert len(scanner._outstanding) == 1, (
         f"--max-parallelism 1 przepuscilo {len(scanner._outstanding)} sond"
     )
+
+
+# ---------------------------------------------------------------------------
+# sendto(): blad jednego portu nie moze zabic calego skanu
+# ---------------------------------------------------------------------------
+
+
+class _FailingSock:
+    def __init__(self, code):
+        self.code = code
+
+    def sendto(self, *_a):
+        raise OSError(self.code, "wymuszony blad")
+
+
+def _one_host(opts, perf):
+    from pynmap.engine import HostScanStats
+
+    host = HostScanStats(Target(ip="127.0.0.1"), opts, perf, now=time.monotonic())
+    host.source_ip = "127.0.0.1"
+    return host
+
+
+@pytest.mark.parametrize("code", [errno.EPERM, errno.EACCES])
+def test_sendto_eperm_filters_one_port_not_the_host(code):
+    """
+    Netfilter odrzuca lokalnie generowany pakiet (regula OUTPUT z -j DROP),
+    zwracajac EPERM. Dotyczy JEDNEGO portu i powinno dac admin-prohibited,
+    dokladnie jak EACCES/EPERM z connect() w -sT. Gole `raise` zabijalo
+    tu caly skan, razem z innymi portami i innymi CELAMI w przebiegu.
+    """
+    opts = _opts([80])
+    perf = opts.build_perf()
+    scanner = SynScanner(opts, perf)
+    scanner._send_sock = _FailingSock(code)
+    host = _one_host(opts, perf)
+
+    assert scanner._send_syn(host, 80, time.monotonic()) is True
+    entry = host.portlist.get(80)
+    assert entry.state is PortState.FILTERED
+    assert entry.reason is Reason.ADMINPROHIBITED
+    assert host.skip_reason is None, "blad jednego portu nie moze konczyc hosta"
+
+
+@pytest.mark.parametrize("code", [errno.EHOSTUNREACH, errno.ENETUNREACH])
+def test_sendto_unreachable_filters_one_port(code):
+    opts = _opts([80])
+    perf = opts.build_perf()
+    scanner = SynScanner(opts, perf)
+    scanner._send_sock = _FailingSock(code)
+    host = _one_host(opts, perf)
+
+    assert scanner._send_syn(host, 80, time.monotonic()) is True
+    assert host.portlist.get(80).state is PortState.FILTERED
+    assert host.skip_reason is None
+
+
+def test_sendto_unknown_errno_skips_host_without_raising():
+    """
+    Nieznane errno dotyczy hosta, nie portu — ale NIE moze lecec w gore
+    jako wyjatek, bo ginie z nim caly przebieg. -sT robi w tej sytuacji
+    _skip_host i oba silniki musza byc spojne.
+    """
+    opts = _opts([80])
+    perf = opts.build_perf()
+    scanner = SynScanner(opts, perf)
+    scanner._send_sock = _FailingSock(errno.EINVAL)
+    host = _one_host(opts, perf)
+
+    assert scanner._send_syn(host, 80, time.monotonic()) is False
+    assert host.skip_reason is not None
+    assert "sendto" in host.skip_reason
+    assert host.completed(), "kolejki niewyczyszczone, petla glowna nie skonczy"
+
+
+def test_sendto_enobufs_requeues_port():
+    """Kontrola: pelny bufor nadawczy to chwila, nie wyrok na port ani host."""
+    opts = _opts([80])
+    perf = opts.build_perf()
+    scanner = SynScanner(opts, perf)
+    scanner._send_sock = _FailingSock(errno.ENOBUFS)
+    host = _one_host(opts, perf)
+    before = len(host.ports_todo)
+
+    assert scanner._send_syn(host, 80, time.monotonic()) is False
+    assert host.skip_reason is None
+    assert len(host.ports_todo) == before + 1
+
+
+# ---------------------------------------------------------------------------
+# Okno nie moze byc rozdawane zawsze od hosts[0]
+# ---------------------------------------------------------------------------
+
+
+def test_group_window_is_shared_round_robin():
+    """
+    Bramka grupowa robi `return` z calej funkcji, a iteracja startowala
+    zawsze od hosts[0], wiec okno bylo rozdawane scisle w kolejnosci listy
+    celow i hosty z jej konca dostawaly nieproporcjonalnie malo sond
+    (albo zero). nmap trzyma na to kursor w UltraScanInfo (nextI).
+    """
+    from pynmap.engine import HostScanStats, Probe
+
+    HOSTS = 12
+    opts = ScanOptions(
+        scan_type=ScanType.SYN,
+        ports=list(range(1, 201)),
+        timing=TIMING_TEMPLATES[4],
+        randomize_ports=False,
+        resolve_dns=False,
+    )
+    perf = opts.build_perf()
+    scanner = SynScanner(opts, perf)
+    now = time.monotonic()
+
+    hosts = []
+    for i in range(HOSTS):
+        host = HostScanStats(Target(ip=f"127.0.0.{i + 1}"), opts, perf, now=now)
+        host.source_ip = "127.0.0.1"
+        hosts.append(host)
+
+    def fake_send(host_, port, when):
+        probe = Probe(port=port, tryno=0, sent_at=when,
+                      timeout_at=when + 99.0, seq=1, sport=40000)
+        host_.register_sent(probe, when, group=scanner.group_timing)
+        scanner._outstanding[(host_.target.ip, port)] = (host_, probe)
+        return True
+
+    scanner._send_syn = fake_send
+
+    # kilka rund wysylki przeplatanych odpowiedziami, jak w prawdziwej petli
+    for _ in range(20):
+        scanner._send_new_probes(hosts, time.monotonic())
+        for key in list(scanner._outstanding)[:6]:
+            host_, probe = scanner._outstanding.pop(key)
+            host_.outstanding.pop(probe.key, None)
+            scanner.group_timing.ack(perf)
+
+    counts = [h.probes_sent for h in hosts]
+    assert all(c > 0 for c in counts), f"host bez ani jednej sondy: {counts}"
+    # bez kursora rozrzut siegal kilkunastokrotnosci
+    assert max(counts) <= 3 * min(counts), f"rozdzial okna nierowny: {counts}"
+
+
+def test_skipped_host_is_not_probed_again():
+    """Host z ustawionym skip_reason nie moze dostawac kolejnych sond."""
+    from pynmap.engine import HostScanStats
+
+    opts = _opts([80, 443])
+    perf = opts.build_perf()
+    scanner = SynScanner(opts, perf)
+    host = HostScanStats(Target(ip="127.0.0.1"), opts, perf, now=time.monotonic())
+    host.source_ip = "127.0.0.1"
+    host.skip_reason = "wymuszone"
+
+    sent = []
+    scanner._send_syn = lambda h, p, w: sent.append(p) or True
+    scanner._send_new_probes([host], time.monotonic())
+
+    assert sent == []
+
+
+def test_round_robin_cursor_advances_after_each_send():
+    """
+    Kursor musi przesuwac sie PO KAZDEJ wyslanej sondzie, nie tylko gdy
+    bramka grupowa zablokuje wysylke. Inaczej kazdy przebieg petli `while
+    progress` startuje od tego samego hosta i obsluguje go wielokrotnie,
+    zanim dojdzie do pozostalych.
+    """
+    from pynmap.engine import HostScanStats, Probe
+
+    opts = ScanOptions(
+        scan_type=ScanType.SYN,
+        ports=[80],
+        timing=TIMING_TEMPLATES[4],
+        randomize_ports=False,
+        resolve_dns=False,
+    )
+    perf = opts.build_perf()
+    scanner = SynScanner(opts, perf)
+    now = time.monotonic()
+
+    hosts = []
+    for i in range(3):
+        host = HostScanStats(Target(ip=f"127.0.0.{i + 1}"), opts, perf, now=now)
+        host.source_ip = "127.0.0.1"
+        hosts.append(host)
+
+    def fake_send(host_, port, when):
+        probe = Probe(port=port, tryno=0, sent_at=when,
+                      timeout_at=when + 99.0, seq=1, sport=40000)
+        host_.register_sent(probe, when, group=scanner.group_timing)
+        scanner._outstanding[(host_.target.ip, port)] = (host_, probe)
+        return True
+
+    scanner._send_syn = fake_send
+    assert scanner._next_host_idx == 0
+
+    scanner._send_new_probes(hosts, now)
+
+    # kazdy host ma po jednym porcie, wiec po obsludze wszystkich trzech
+    # kursor musi byc przesuniety, a nie stac na zerze
+    assert all(h.probes_sent == 1 for h in hosts), [h.probes_sent for h in hosts]
+    assert scanner._next_host_idx != 0 or len(hosts) == 1

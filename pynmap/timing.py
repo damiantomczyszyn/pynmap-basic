@@ -14,8 +14,7 @@ Jednostki: wszystko wewnętrznie w mikrosekundach (jak w nmapie).
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .constants import (
     INITIAL_RTT_TIMEOUT_MS,
@@ -246,7 +245,12 @@ class UltraTimingVals:
     num_replies_expected: int = 0
     num_replies_received: int = 0
     num_updates: int = 0
-    last_drop: float = field(default_factory=lambda: 0.0)
+    # -inf znaczy "jeszcze nigdy nie zmniejszaliśmy okna". 0.0 nie nadaje się
+    # na ten sentinel, bo jest poprawnym punktem na skali time.monotonic()
+    # (patrz ten sam błąd przy last_probe_sent) — a wartość `now` z chwili
+    # startu skanu sprawiała, że bramka _already_dropped() blokowała PIERWSZĄ
+    # reakcję na straty, czyli dokładnie tę, która ma zadziałać.
+    last_drop: float = float("-inf")
 
     @classmethod
     def init_for(
@@ -257,7 +261,10 @@ class UltraTimingVals:
         return cls(
             cwnd=float(cwnd),
             ssthresh=perf.initial_ssthresh,
-            last_drop=now if now is not None else time.monotonic(),
+            # NIE `now`: na starcie skanu nie było jeszcze żadnej straty,
+            # a zapisanie tu bieżącej chwili znaczyłoby "właśnie zmniejszono
+            # okno" i wyciszyłoby pierwszą reakcję.
+            last_drop=float("-inf"),
         )
 
     def cc_scale(self, perf: ScanPerformanceVars) -> float:
@@ -289,18 +296,47 @@ class UltraTimingVals:
         if self.cwnd > perf.max_cwnd:
             self.cwnd = float(perf.max_cwnd)
 
+    def _already_dropped(self, now: float, window: float) -> bool:
+        """
+        Czy od ostatniego zmniejszenia okna minęło mniej niż `window`.
+
+        Pole last_drop było ZAPISYWANE przez drop()/drop_group(), ale w całym
+        repo nie było ani jednego jego odczytu. Tymczasem pętla timeoutów woła
+        drop_group osobno dla KAŻDEJ wygasłej sondy, a sondy wysłane w jednym
+        oknie wygasają w tej samej iteracji — jedna fala strat zwijała więc
+        okno wielokrotnie (10 wywołań: cwnd 10 -> 5 -> 2,5 -> 1,25 -> 1).
+        W TCP i w nmapie jedna fala to JEDNA reakcja; po to właśnie nmap
+        trzyma last_drop.
+
+        window <= 0 wyłącza bramkę, żeby istniejące wywołania i testy
+        zachowały dotychczasowe zachowanie.
+        """
+        return window > 0 and (now - self.last_drop) < window
+
     def drop(
-        self, in_flight: int, perf: ScanPerformanceVars, now: float
+        self,
+        in_flight: int,
+        perf: ScanPerformanceVars,
+        now: float,
+        window: float = 0.0,
     ) -> None:
         """Port ultra_timing_vals::drop() — timeout per-host, ostra reakcja."""
+        if self._already_dropped(now, window):
+            return
         self.cwnd = float(perf.low_cwnd)
         self.ssthresh = int(max(in_flight / perf.host_drop_ssthresh_divisor, 2))
         self.last_drop = now
 
     def drop_group(
-        self, in_flight: int, perf: ScanPerformanceVars, now: float
+        self,
+        in_flight: int,
+        perf: ScanPerformanceVars,
+        now: float,
+        window: float = 0.0,
     ) -> None:
         """Port ultra_timing_vals::drop_group() — łagodniejsza reakcja grupowa."""
+        if self._already_dropped(now, window):
+            return
         self.cwnd = max(float(perf.low_cwnd), self.cwnd / perf.group_drop_cwnd_divisor)
         self.ssthresh = int(max(in_flight / perf.group_drop_ssthresh_divisor, 2))
         self.last_drop = now

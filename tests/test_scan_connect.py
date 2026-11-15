@@ -536,3 +536,48 @@ def test_single_fd_failure_still_only_requeues(monkeypatch):
     assert report.skip_reason is None
     assert report.host_up is True
     assert 80 in report.portlist.results
+
+
+# ---------------------------------------------------------------------------
+# Silnik musi PRZEKAZAC okno dropu, nie tylko je mieć
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_wave_shrinks_group_window_once(monkeypatch):
+    """
+    timing.py honoruje `window`, ale to silnik musi je podac. Bez tego jedna
+    fala timeoutow nadal zwijala okno grupowe raz na KAZDA wygasla sonde
+    (10 -> 5 -> 2,5 -> 1,25 -> 1), bo _handle_timeouts() wola drop_group
+    w petli po host.expired_probes().
+
+    To ta sama klasa luki, co przy select_timeout: poprawka siedziala
+    w helperze, a miejsce wywolania nie mialo pokrycia.
+    """
+    opts = ScanOptions(
+        ports=list(range(1, 13)),
+        timing=TIMING_TEMPLATES[4],
+        randomize_ports=False,
+        resolve_dns=False,
+        max_retries=0,
+    )
+    perf = opts.build_perf()
+    scanner = ConnectScanner(opts, perf)
+
+    now = 10_000.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    host = HostScanStats(Target(ip="192.0.2.1"), opts, perf, now=now)
+    host.to.adjust(2_000)  # srtt ~2 ms, czyli okno dropu ~2 ms
+
+    for port in range(1, 13):
+        host.register_sent(
+            Probe(port=port, tryno=0, sent_at=now, timeout_at=now + 0.01), now
+        )
+
+    start = scanner.group_timing.cwnd
+    later = now + 0.02
+    monkeypatch.setattr(time, "monotonic", lambda: later)
+    scanner._handle_timeouts([host], later)
+
+    assert scanner.group_timing.cwnd == start / perf.group_drop_cwnd_divisor, (
+        f"okno zwiniete {start} -> {scanner.group_timing.cwnd} przez jedna fale"
+    )

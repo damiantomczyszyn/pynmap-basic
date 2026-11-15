@@ -199,7 +199,8 @@ class ConnectScanner:
                 self._close_probe_socket(probe)
                 host.register_timeout(probe, now)
                 self.group_timing.drop_group(
-                    len(self._pending) + 1, self.perf, now
+                    len(self._pending) + 1, self.perf, now,
+                    window=host.drop_window(),
                 )
 
     # -- faza 2: wysyłanie nowych sond --------------------------------------

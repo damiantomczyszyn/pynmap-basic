@@ -55,6 +55,18 @@ from .timing import ScanPerformanceVars, UltraTimingVals
 
 RECV_BUFSIZE = 65535
 
+# errno z sendto() oznaczające "ten cel/port jest nieosiągalny" — rozstrzygają
+# jeden port, a nie cały host.
+_SEND_UNREACH: dict[int, Reason] = {
+    errno.EHOSTUNREACH: Reason.HOSTUNREACH,
+    errno.ENETUNREACH: Reason.NETUNREACH,
+}
+for _name, _reason in (("ENETDOWN", Reason.NETUNREACH),
+                       ("EHOSTDOWN", Reason.NORESPONSE)):
+    _code = getattr(errno, _name, None)
+    if _code is not None:
+        _SEND_UNREACH.setdefault(_code, _reason)
+
 
 class RawSocketError(RuntimeError):
     """Brak uprawnień lub wsparcia dla surowych socketów."""
@@ -102,6 +114,13 @@ class SynScanner:
         self.perf = perf or opts.build_perf()
         self.source_port = pick_source_port(opts.source_port)
         self.group_timing = UltraTimingVals.init_for(self.perf, group=True)
+
+        # Kursor round-robin po hostach. Bramka grupowa robi `return` z całej
+        # funkcji, a iteracja startowała zawsze od hosts[0], więc okno było
+        # rozdawane ściśle w kolejności listy celów i hosty z jej końca mogły
+        # nie dostać ani jednej sondy. nmap trzyma ten kursor w UltraScanInfo
+        # (nextI) dokładnie po to.
+        self._next_host_idx = 0
 
         self._send_sock: socket.socket | None = None
         self._tcp_sock: socket.socket | None = None
@@ -237,6 +256,13 @@ class SynScanner:
         reports.sort(key=lambda r: order.get(id(r.target), 0))
         return reports
 
+    def _skip_host(self, host: HostScanStats, reason: str) -> None:
+        """Host nie da się skanować dalej — zapisujemy powód i zamykamy go."""
+        for probe in list(host.outstanding.values()):
+            self._outstanding.pop((host.target.ip, probe.port), None)
+        host.abandon_outstanding()
+        host.skip_reason = reason
+
     # -- faza 1: timeouty ---------------------------------------------------
 
     def _handle_timeouts(self, hosts: list[HostScanStats], now: float) -> None:
@@ -251,23 +277,35 @@ class SynScanner:
             for probe in host.expired_probes(now):
                 self._outstanding.pop((host.target.ip, probe.port), None)
                 host.register_timeout(probe, now)
-                self.group_timing.drop_group(len(self._outstanding) + 1, self.perf, now)
+                self.group_timing.drop_group(
+                    len(self._outstanding) + 1, self.perf, now,
+                    window=host.drop_window(),
+                )
 
     # -- faza 2: wysyłanie --------------------------------------------------
 
     def _send_new_probes(self, hosts: list[HostScanStats], now: float) -> None:
+        if not hosts:
+            return
+
         progress = True
         while progress:
             progress = False
-            for host in hosts:
+            for step in range(len(hosts)):
+                idx = (self._next_host_idx + step) % len(hosts)
+                host = hosts[idx]
+
                 # Grupowe okno zatłoczenia: do tej pory było liczone
                 # (ack/drop_group), ale nigdy nie odpytywane, więc w -sS
                 # tempo ograniczało wyłącznie okno per-host. W -sT ta
                 # bramka jest od początku — teraz oba silniki działają
                 # tak samo.
                 if len(self._outstanding) >= int(self.group_timing.cwnd):
+                    # zapamiętujemy, od kogo wznowić, żeby następne wolne
+                    # miejsce w oknie dostał ten host, a nie znów hosts[0]
+                    self._next_host_idx = idx
                     return
-                if host.timed_out or not host.send_ok(now):
+                if host.timed_out or host.skip_reason or not host.send_ok(now):
                     continue
 
                 port = host.next_port()
@@ -276,6 +314,7 @@ class SynScanner:
 
                 if self._send_syn(host, port, now):
                     progress = True
+                self._next_host_idx = (idx + 1) % len(hosts)
                 now = time.monotonic()
 
     def _send_syn(self, host: HostScanStats, port: int, now: float) -> bool:
@@ -302,14 +341,29 @@ class SynScanner:
                 # bufor nadawczy pełny — port wraca do kolejki
                 host.ports_todo.appendleft(port)
                 return False
-            if exc.errno in (errno.EHOSTUNREACH, errno.ENETUNREACH):
+            if exc.errno in _SEND_UNREACH:
                 host.portlist.set_state(
                     port, PortState.FILTERED,
-                    reason=Reason.HOSTUNREACH if exc.errno == errno.EHOSTUNREACH
-                    else Reason.NETUNREACH,
+                    reason=_SEND_UNREACH[exc.errno],
                 )
                 return True
-            raise
+            if exc.errno in (errno.EPERM, errno.EACCES):
+                # Netfilter odrzucil lokalnie generowany pakiet, czyli reguła
+                # OUTPUT z -j DROP/REJECT na ten cel i port. Dotyczy JEDNEGO
+                # portu, więc odpowiada to dokładnie temu, co -sT robi dla
+                # EACCES/EPERM z connect(): admin-prohibited.
+                host.portlist.set_state(
+                    port, PortState.FILTERED, reason=Reason.ADMINPROHIBITED
+                )
+                return True
+            # Cokolwiek innego dotyczy hosta, nie portu. Gołe `raise` zabijało
+            # tu CAŁY skan — razem z pozostałymi portami tego hosta i ze
+            # wszystkimi innymi celami w przebiegu, łącznie z wynikami już
+            # zmierzonymi. -sT zachowuje się w tej sytuacji inaczej
+            # (_skip_host), więc oba silniki były niespójne.
+            host.ports_todo.appendleft(port)
+            self._skip_host(host, f"sendto(): {exc.strerror or exc}")
+            return False
 
         probe = Probe(
             port=port,
