@@ -31,6 +31,7 @@ from __future__ import annotations
 import errno
 import selectors
 import socket
+import sys
 import time
 
 from .constants import PortState, Reason, ScanType
@@ -70,9 +71,59 @@ if hasattr(errno, "ENONET"):
 # EWOULDBLOCK == EAGAIN na Linuksie, ale nie wszędzie
 _ERRNO_MAP.setdefault(errno.EWOULDBLOCK, (PortState.OPEN, Reason.CONACCEPT))
 
+# ---------------------------------------------------------------------------
+# Kody Winsock (WSAE*)
+# ---------------------------------------------------------------------------
+# Na Windowsie connect_ex() i SO_ERROR zwracają kody Winsock z zakresu
+# 10000+, a NIE wartości POSIX: połączenie odrzucone to 10061, nie 111.
+# Bez tych wpisów każdy zamknięty port wpadał w gałąź "nieznane errno"
+# i był raportowany jako `filtered` — czyli -sT na Windowsie dawał wynik
+# wyglądający na poprawny, a będący nieprawdą.
+#
+# Kody są stałe i udokumentowane (Winsock2 error codes), a ich zakres nie
+# koliduje z żadną wartością POSIX, więc wpisujemy je liczbowo i
+# bezwarunkowo — na Linuksie są po prostu nieużywane.
+_WSAEACCES = 10013
+_WSAEWOULDBLOCK = 10035
+_WSAEINPROGRESS = 10036
+_WSAEALREADY = 10037
+_WSAENETDOWN = 10050
+_WSAENETUNREACH = 10051
+_WSAECONNABORTED = 10053
+_WSAECONNRESET = 10054
+_WSAEISCONN = 10056
+_WSAETIMEDOUT = 10060
+_WSAECONNREFUSED = 10061
+_WSAEHOSTDOWN = 10064
+_WSAEHOSTUNREACH = 10065
+
+_ERRNO_MAP.update(
+    {
+        _WSAEISCONN: (PortState.OPEN, Reason.CONACCEPT),
+        _WSAECONNREFUSED: (PortState.CLOSED, Reason.CONREFUSED),
+        _WSAECONNRESET: (PortState.CLOSED, Reason.RESETPEER),
+        _WSAECONNABORTED: (PortState.CLOSED, Reason.RESETPEER),
+        _WSAEACCES: (PortState.FILTERED, Reason.ADMINPROHIBITED),
+        _WSAEHOSTUNREACH: (PortState.FILTERED, Reason.HOSTUNREACH),
+        _WSAENETUNREACH: (PortState.FILTERED, Reason.NETUNREACH),
+        _WSAENETDOWN: (PortState.FILTERED, Reason.NETUNREACH),
+        _WSAETIMEDOUT: (PortState.FILTERED, Reason.NORESPONSE),
+        _WSAEHOSTDOWN: (PortState.FILTERED, Reason.NORESPONSE),
+    }
+)
+
+# Ile razy pod rząd tolerujemy porażkę socket() przy pustym zbiorze sond
+# w locie, zanim uznamy host za nieskanowalny. Bez takiego limitu nie ma
+# nikogo, kto zwolniłby deskryptor, więc kolejne próby to pętla bez postępu.
+_FD_FAILURE_LIMIT = 3
+
+# UWAGA: WSAEWOULDBLOCK to na Windowsie normalne "connect() w toku",
+# a NIE odpowiednik linuksowego EAGAIN -> open. Trafia więc wyłącznie
+# do _IN_PROGRESS; w mapie stanów oznaczałby każdy port jako otwarty.
 _IN_PROGRESS = {errno.EINPROGRESS, errno.EALREADY}
 if hasattr(errno, "EWOULDBLOCK"):
     _IN_PROGRESS.add(errno.EWOULDBLOCK)
+_IN_PROGRESS.update({_WSAEWOULDBLOCK, _WSAEINPROGRESS, _WSAEALREADY})
 
 
 def classify_connect_errno(code: int) -> tuple[PortState, Reason]:
@@ -98,6 +149,9 @@ class ConnectScanner:
         self.opts = opts
         self.perf = perf or opts.build_perf()
         self.max_sockets = max_sockets_allowed()
+        # ile razy pod rząd socket() zawiódł, nie mając ani jednej sondy
+        # w locie, która mogłaby zwolnić deskryptor
+        self._fd_failures = 0
         self.group_timing = UltraTimingVals.init_for(self.perf, group=True)
         self._selector = selectors.DefaultSelector()
         # fd -> (HostScanStats, Probe)
@@ -145,7 +199,8 @@ class ConnectScanner:
                 self._close_probe_socket(probe)
                 host.register_timeout(probe, now)
                 self.group_timing.drop_group(
-                    len(self._pending) + 1, self.perf, now
+                    len(self._pending) + 1, self.perf, now,
+                    window=host.drop_window(),
                 )
 
     # -- faza 2: wysyłanie nowych sond --------------------------------------
@@ -161,7 +216,12 @@ class ConnectScanner:
                 # dwie bramy: limit deskryptorów i grupowe okno zatłoczenia
                 if len(self._pending) >= self.max_sockets:
                     return
-                if len(self._pending) >= int(self.group_timing.cwnd) + self.perf.low_cwnd:
+                # int(cwnd), a NIE cwnd + low_cwnd: przy max_parallelism = 1
+                # (tak ustawiają -T0, -T1, -T2 oraz jawne --max-parallelism 1)
+                # cwnd i low_cwnd są równe 1, więc stary warunek przepuszczał
+                # DWIE sondy naraz — czyli dwukrotność tempa, o które prosi
+                # szablon wybierany właśnie po to, żeby być cichym.
+                if len(self._pending) >= int(self.group_timing.cwnd):
                     return
                 if not host.send_ok(now):
                     continue
@@ -184,7 +244,22 @@ class ConnectScanner:
             if exc.errno in (errno.EMFILE, errno.ENFILE):
                 # brak deskryptorów — port wraca do kolejki, spróbujemy później
                 host.ports_todo.appendleft(port)
-                self.max_sockets = max(8, len(self._pending))
+                # Podłoga 8 była błędem: gdy realna pojemność jest MNIEJSZA
+                # niż 8, max_sockets zostawało na 8, len(_pending) nigdy go
+                # nie dobijało, więc żadna bramka nie blokowała wysyłki
+                # i pętla kręciła się bez końca na 100% CPU (ulimit -n 10
+                # wystarczał, żeby skan nigdy się nie skończył).
+                self.max_sockets = max(1, min(self.max_sockets, len(self._pending)))
+                if self._pending:
+                    # są sondy w locie — zwolnią deskryptor, warto poczekać
+                    return
+                self._fd_failures += 1
+                if self._fd_failures >= _FD_FAILURE_LIMIT:
+                    self._skip_host(
+                        host,
+                        "brak wolnych deskryptorów: "
+                        f"{exc.strerror or exc} (zwiększ ulimit -n)",
+                    )
                 return
             # Cokolwiek innego dotyczy całego hosta, nie jednego portu:
             # typowy przypadek to EAFNOSUPPORT na maszynie z wyłączonym
@@ -197,6 +272,7 @@ class ConnectScanner:
             )
             return
 
+        self._fd_failures = 0
         sock.setblocking(False)
         self._configure_socket(sock, host)
 
@@ -253,10 +329,14 @@ class ConnectScanner:
         try:
             import struct as _struct
 
+            # Windows ma inny układ struct linger: dwa u_short, nie dwa int,
+            # więc "ii" dawało 8 bajtów tam, gdzie jądro oczekuje 4 —
+            # setsockopt zwracał WSAEFAULT i opcja po cichu nie była ustawiana.
+            layout = "hh" if sys.platform == "win32" else "ii"
             sock.setsockopt(
                 socket.SOL_SOCKET,
                 socket.SO_LINGER,
-                _struct.pack("ii", 1, 0),
+                _struct.pack(layout, 1, 0),
             )
         except OSError:
             pass

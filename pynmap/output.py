@@ -44,6 +44,25 @@ def _port_label(port: int) -> str:
     return f"{port}/tcp"
 
 
+def _partial_scan_note(host: HostReport) -> str:
+    """
+    Jedna linia mówiąca, że wynik hosta jest NIEPEŁNY.
+
+    Bez tego częściowy raport wyglądałby jak kompletny — a to gorsze niż
+    brak raportu, bo nie da się odróżnić "port zamknięty" od "nie zdążyliśmy
+    go zbadać".
+    """
+    measured = len(host.portlist.results)
+    asked = len(host.scanned_ports)
+
+    if host.timed_out:
+        return f"Host timeout; zmierzono {measured} z {asked} portów."
+    if not host.host_up:
+        reason = host.skip_reason or "host pominięty"
+        return f"Skan przerwany ({reason}); zmierzono {measured} z {asked} portów."
+    return ""
+
+
 def _summarize_hidden(
     hidden: list[PortResult],
 ) -> list[tuple[PortState, int, object | None]]:
@@ -114,7 +133,9 @@ def format_normal(
     hosts_up = 0
 
     for host in report.hosts:
-        if not host.host_up:
+        # Host przerwany albo pominięty, ale BEZ ani jednego wyniku: nie ma
+        # czego raportować, zostaje sama informacja o pominięciu.
+        if not host.host_up and not host.portlist.results:
             lines.append("")
             reason = host.skip_reason or "host pominięty"
             lines.append(f"Skipping {host.target.display_name} ({reason})")
@@ -125,9 +146,14 @@ def format_normal(
         lines.append(f"pynmap-basic scan report for {host.target.display_name}")
         lines.append(f"Host is up{_fmt_latency(host)}.")
 
-        if host.timed_out:
-            lines.append("Skipping host due to host timeout.")
-            continue
+        # Wynik CZĘŚCIOWY: skan hosta przerwano, ale część portów zdążyła
+        # odpowiedzieć. Dotąd te pomiary przepadały — gałąź "Skipping"
+        # (albo "Skipping host due to host timeout") wychodziła z pętli
+        # przed tabelą portów, więc znaleziony port `open` nie trafiał ani
+        # do -oN, ani do -oG. To prawdziwe pomiary, nie domysły.
+        annotation = _partial_scan_note(host)
+        if annotation:
+            lines.append(annotation)
 
         results = host.portlist.sorted_results()
         shown, hidden = split_results(
@@ -194,9 +220,17 @@ def format_grepable(report: ScanReport, services: ServiceDB) -> str:
 
     for host in report.hosts:
         name = host.target.hostname or host.target.reverse_dns or ""
-        if not host.host_up:
+        if not host.host_up and not host.portlist.results:
             lines.append(f"Host: {host.target.ip} ({name})\tStatus: Skipped")
             continue
+
+        # Status mówi wprost, czy lista portów jest pełna — parser -oG nie ma
+        # innego sposobu, żeby to odróżnić.
+        status = "Up"
+        if host.timed_out:
+            status = "Timeout"
+        elif not host.host_up:
+            status = "Aborted"
 
         entries = []
         for entry in host.portlist.sorted_results():
@@ -205,7 +239,7 @@ def format_grepable(report: ScanReport, services: ServiceDB) -> str:
             entries.append(f"{entry.port}/{entry.state}/tcp//{service}///")
 
         lines.append(
-            f"Host: {host.target.ip} ({name})\tStatus: Up\t"
+            f"Host: {host.target.ip} ({name})\tStatus: {status}\t"
             f"Ports: {', '.join(entries)}"
         )
 

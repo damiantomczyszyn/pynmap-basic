@@ -114,3 +114,61 @@ def test_portlist_sorted():
     for port in (443, 22, 80):
         pl.set_state(port, PortState.OPEN, Reason.SYNACK)
     assert [e.port for e in pl.sorted_results()] == [22, 80, 443]
+
+
+# ---------------------------------------------------------------------------
+# Prefiks protokolu jest "lepki", jak w nmapie
+# ---------------------------------------------------------------------------
+
+
+def test_protocol_prefix_is_sticky_across_chunks(lookup):
+    """
+    W nmapie -p U:53,161 oznacza, ze OBA porty sa UDP. Trzymanie prefiksu
+    per-element sprawialo, ze 'U:53,80' cicho skanowalo TCP/80 — uzytkownik
+    prosil o UDP, a dostawal skan TCP jednego z podanych portow.
+    """
+    with pytest.raises(PortSpecError):
+        parse_port_spec("U:53,80", service_lookup=lookup)
+    with pytest.raises(PortSpecError):
+        parse_port_spec("U:53,161", service_lookup=lookup)
+
+
+def test_protocol_prefix_can_switch_back_to_tcp(lookup):
+    assert parse_port_spec("T:80,U:53,T:443", service_lookup=lookup) == [80, 443]
+    assert parse_port_spec("T:80,U:53", service_lookup=lookup) == [80]
+
+
+def test_unknown_protocol_prefix_is_rejected(lookup):
+    with pytest.raises(PortSpecError):
+        parse_port_spec("x:80", service_lookup=lookup)
+
+
+def test_plain_ranges_are_not_mistaken_for_services(lookup):
+    assert parse_port_spec("1-5", service_lookup=lookup) == [1, 2, 3, 4, 5]
+    assert parse_port_spec("80-82", service_lookup=lookup) == [80, 81, 82]
+
+
+# ---------------------------------------------------------------------------
+# Nazwy uslug z myslnikiem
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name,port",
+    [("http-proxy", 8080), ("https-alt", 8443), ("ms-wbt-server", 3389)],
+)
+def test_hyphenated_service_names_resolve(name, port, lookup):
+    """
+    Myslnik w nazwie uslugi trafial w galez zakresu i rozbijal nazwe na pol
+    ('http-proxy' -> blad "'proxy' nie jest numerem portu"), wiec nazwy,
+    ktore SA w bazie, byly nieosiagalne przez -p.
+    """
+    assert parse_port_spec(name, service_lookup=lookup) == [port]
+
+
+def test_service_port_outside_range_is_rejected():
+    """Baza uslug moze pochodzic z pliku uzytkownika, wiec to tez wejscie."""
+    with pytest.raises(PortSpecError):
+        parse_port_spec("zle", service_lookup=lambda _n: 99999)
+    with pytest.raises(PortSpecError):
+        parse_port_spec("zle", service_lookup=lambda _n: 0)

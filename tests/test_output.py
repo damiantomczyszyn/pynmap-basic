@@ -290,3 +290,110 @@ def test_skip_reason_lands_in_json(services):
     rep = ScanReport(scan_type=ScanType.SYN, hosts=[host], started_at=0.0)
     data = json.loads(format_json(rep, services))
     assert data["hosts"][0]["skip_reason"] == "IPv6 nie jest wspierane w -sS; użyj -sT"
+
+
+# ---------------------------------------------------------------------------
+# Wynik czesciowy nie moze przepadac
+# ---------------------------------------------------------------------------
+
+
+def _partial_host(**kwargs):
+    pl = PortList()
+    pl.set_state(8899, PortState.OPEN, Reason.CONACCEPT, rtt_us=120)
+    pl.set_state(22, PortState.CLOSED, Reason.CONREFUSED, rtt_us=90)
+    defaults = {
+        "target": Target(ip="127.0.0.1"),
+        "portlist": pl,
+        "scanned_ports": list(range(1, 41)),
+        "elapsed_s": 0.1,
+        "probes_sent": 2,
+        "replies_received": 2,
+    }
+    defaults.update(kwargs)
+    return HostReport(**defaults)
+
+
+def _report(host):
+    return ScanReport(scan_type=ScanType.CONNECT, hosts=[host], started_at=0.0)
+
+
+def test_aborted_host_keeps_measured_ports_in_normal(services):
+    """
+    Galaz "Skipping <host>" wychodzila z petli PRZED tabela portow, wiec
+    port znaleziony jako open przepadal z -oN. To byly prawdziwe pomiary,
+    nie domysly — gorsze niz brak raportu, bo nie da sie ich odzyskac.
+    """
+    host = _partial_host(host_up=False, skip_reason="socket(AF_INET): ENOBUFS")
+    text = format_normal(_report(host), services)
+
+    assert "8899/tcp" in text
+    assert "open" in text
+    assert "Skan przerwany" in text
+    assert "2 z 40" in text, "brak informacji, ze wynik jest niepelny"
+
+
+def test_timed_out_host_keeps_measured_ports_in_normal(services):
+    host = _partial_host(timed_out=True)
+    text = format_normal(_report(host), services)
+
+    assert "8899/tcp" in text
+    assert "Host timeout" in text
+    assert "2 z 40" in text
+
+
+def test_aborted_host_keeps_measured_ports_in_grepable(services):
+    host = _partial_host(host_up=False, skip_reason="socket(AF_INET): ENOBUFS")
+    text = format_grepable(_report(host), services)
+
+    assert "8899/open/tcp" in text
+    assert "Status: Aborted" in text, "parser -oG musi wiedziec, ze lista jest niepelna"
+
+
+def test_timed_out_host_marked_in_grepable(services):
+    host = _partial_host(timed_out=True)
+    text = format_grepable(_report(host), services)
+
+    assert "8899/open/tcp" in text
+    assert "Status: Timeout" in text
+
+
+def test_host_with_no_results_is_still_just_skipped(services):
+    """Bez ani jednego pomiaru nie ma czego raportowac — zostaje 'Skipping'."""
+    host = HostReport(
+        target=Target(ip="::1"),
+        portlist=PortList(),
+        scanned_ports=[80, 443],
+        elapsed_s=0.0,
+        probes_sent=0,
+        replies_received=0,
+        host_up=False,
+        skip_reason="socket(AF_INET6): nie wspierane",
+    )
+    text = format_normal(_report(host), services)
+
+    assert "Skipping ::1" in text
+    assert "PORT" not in text
+
+
+def test_no_results_host_is_skipped_in_grepable(services):
+    host = HostReport(
+        target=Target(ip="::1"),
+        portlist=PortList(),
+        scanned_ports=[80],
+        elapsed_s=0.0,
+        probes_sent=0,
+        replies_received=0,
+        host_up=False,
+        skip_reason="socket(AF_INET6): nie wspierane",
+    )
+    assert "Status: Skipped" in format_grepable(_report(host), services)
+
+
+def test_complete_host_has_no_partial_annotation(services):
+    """Kontrola: pelny wynik nie moze dostac adnotacji o przerwaniu."""
+    host = _partial_host(scanned_ports=[22, 8899])
+    text = format_normal(_report(host), services)
+
+    assert "Skan przerwany" not in text
+    assert "Host timeout" not in text
+    assert "Status: Up" in format_grepable(_report(host), services)

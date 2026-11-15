@@ -124,6 +124,12 @@ MAX_TCP_SCAN_DELAY_MS = 1_000   # nmap.h: MAX_TCP_SCAN_DELAY
 # nmap wylicza to z getrlimit(RLIMIT_NOFILE); my robimy to samo w engine.py.
 DEFAULT_MAX_SOCKETS = 1_024
 
+# Windows: select() przyjmuje najwyżej FD_SETSIZE (512) gniazd na zbiór,
+# a selectors.DefaultSelector sprowadza się tam do SelectSelector.
+# Przy 1024 select() rzucał ValueError("too many file descriptors in
+# select()") w środku skanu. Zostawiamy zapas na gniazda spoza skanu.
+WINDOWS_MAX_SOCKETS = 500
+
 # Rozmiar okna w wysyłanym SYN-ie. nmap używa 1024 dla SYN scan.
 SYN_PROBE_WINDOW = 1024
 SYN_PROBE_MSS = 1460

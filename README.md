@@ -98,6 +98,29 @@ współdzielonej lepiej użyć `sudo` albo osobnego venv-a z własnym binarium.
 
 Bez tych uprawnień `-sT` działa normalnie i nie wymaga niczego.
 
+### Windows i macOS
+
+| | `-sT` | `-sS` |
+|---|---|---|
+| Linux | działa | wymaga `CAP_NET_RAW` |
+| macOS | działa | wymaga `sudo` |
+| Windows | działa | **niedostępny** — patrz niżej |
+
+Na Windowsie `-sS` nie jest i nie będzie wspierany bez Npcapa: system
+blokuje wysyłanie segmentów TCP przez surowe sockety od XP SP2 i nie zmienia
+tego uruchomienie jako Administrator. `pynmap -sS` mówi to wprost, zamiast
+podsuwać linuksowe `setcap`.
+
+Jeśli coś zachowuje się inaczej niż tutaj opisane, pomaga wynik:
+
+```bash
+python3 ci/platform_probe.py
+```
+
+Skrypt wypisuje kody błędów `connect()`, wsparcie surowych socketów, typ
+selektora i układ `struct linger` na danym systemie. Nie wymaga uprawnień
+i nie wysyła pakietów poza `localhost`.
+
 ---
 
 ## Użycie
@@ -141,6 +164,7 @@ sudo python3 -m pynmap -sS -g 53 -p 1-100 192.168.1.10
 | `--host-timeout CZAS` | np. `30s`, `5m` |
 | `--scan-delay CZAS` | minimalna przerwa między sondami |
 | `-g PORT` / `-S IP` | wymuszony port / adres źródłowy (`-sS`) |
+| `--services PLIK` | własna baza `nmap-services` (błąd, jeśli nieczytelna) |
 | `-oN` / `-oG` / `-oJ` | zapis: normal / grepable / JSON |
 
 Pełna lista: `python3 -m pynmap --help`.
@@ -189,7 +213,7 @@ docs/
   port-states.md         tablice decyzyjne errno/flagi -> stan portu
   rozszerzenia.md        plan dojścia do nmapa: tryby, fazy, koszty
 
-tests/                   228 testów (pytest)
+tests/                   341 testów (pytest)
 ```
 
 ---
@@ -232,7 +256,7 @@ pip install pytest
 python3 -m pytest tests/ -v
 ```
 
-228 testów. Pokrywają m.in.:
+341 testów. Pokrywają m.in.:
 
 - zgodność estymatora RTT z wzorami z `timing.cc` (łącznie z zachowaniem
   przesunięć bitowych na liczbach ujemnych),
@@ -246,15 +270,27 @@ python3 -m pytest tests/ -v
 - retransmisje: ponawianie do limitu, potem `filtered`,
 - skan end-to-end na prawdziwym listenerze lokalnym,
 - zwijanie stanów w wyjściu (`Not shown:`) wraz z regresją wydajnościową,
-- czekanie na `--scan-delay` bez kręcenia się na 100% CPU,
+- czekanie na `--scan-delay` bez kręcenia się na 100% CPU — w helperze
+  **oraz** w obu silnikach, bo testowanie mutacyjne pokazało, że sama
+  delegacja nie miała pokrycia,
 - pominięcie hosta, gdy `socket()` zawiedzie (np. wyłączony IPv6),
 - warstwę CLI: `-p ""`, `--top-ports 0` i ujemne `--min/--max-parallelism`
   muszą być błędem, a nie cichym skanem domyślnych 100 portów albo pętlą
   bez wyjścia,
 - że `--host-timeout` nie dopisuje wymyślonych stanów portom, do których
-  nie poszła żadna sonda,
+  nie poszła żadna sonda — ale też że **nie gubi** tych, które zmierzył,
+- że jedna fala timeoutów zwija okno zatłoczenia raz, a nie raz na sondę,
+- że grupowe okno jest rozdawane po hostach rotacyjnie, a nie zawsze od
+  pierwszego z listy,
 - że grupowe okno zatłoczenia faktycznie rośnie, a nie stoi na wartości
-  początkowej.
+  początkowej,
+- że prefiks protokołu w `-p` jest „lepki" (`U:53,80` to dwa porty UDP, jak
+  w nmapie, a nie skan TCP/80),
+- że własna sonda SYN wrócona po loopbacku nie jest liczona jako odpowiedź
+  (`-g 9 -p 9` na zamkniętym porcie nie może dać `open`),
+- że trwały brak deskryptorów kończy hosta, a nie zapętla skan,
+- że wartości idące do pól nagłówka (`--ttl`, `-g`, `-S`) są walidowane,
+  zamiast kończyć skan tracebackiem.
 
 Testy SYN scanu wymagające `CAP_NET_RAW` są automatycznie pomijane bez
 uprawnień, więc `pytest` przechodzi też na zwykłym koncie.
@@ -274,7 +310,9 @@ uprawnień, więc `pytest` przechodzi też na zwykłym koncie.
 - IPv6 w SYN scanie (`-sT` obsługuje oba)
 - rate limitingu (`--min-rate` / `--max-rate`)
 - wysyłania ramek ethernetowych i ARP
-- obsługi Windows (surowe sockety wymagają tam Npcap)
+- `-sS` na Windowsie — system blokuje wysyłanie segmentów TCP przez surowe
+  sockety od XP SP2, niezależnie od praw administratora, więc byłby potrzebny
+  Npcap (tak jak w nmapie). `-sT` na Windowsie działa.
 - wyjścia XML (`-oX`) — mamy JSON
 
 Pełna lista z uzasadnieniem: [`docs/c-vs-python.md`](docs/c-vs-python.md#4-czego-wersja-w-pythonie-nie-ma).

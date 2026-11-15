@@ -27,6 +27,7 @@ import errno
 import os
 import selectors
 import socket
+import sys
 import time
 
 from .constants import SYN_PROBE_MSS, SYN_PROBE_WINDOW, PortState, Reason, ScanType, TcpFlags
@@ -54,9 +55,49 @@ from .timing import ScanPerformanceVars, UltraTimingVals
 
 RECV_BUFSIZE = 65535
 
+# errno z sendto() oznaczające "ten cel/port jest nieosiągalny" — rozstrzygają
+# jeden port, a nie cały host.
+_SEND_UNREACH: dict[int, Reason] = {
+    errno.EHOSTUNREACH: Reason.HOSTUNREACH,
+    errno.ENETUNREACH: Reason.NETUNREACH,
+}
+for _name, _reason in (("ENETDOWN", Reason.NETUNREACH),
+                       ("EHOSTDOWN", Reason.NORESPONSE)):
+    _code = getattr(errno, _name, None)
+    if _code is not None:
+        _SEND_UNREACH.setdefault(_code, _reason)
+
 
 class RawSocketError(RuntimeError):
     """Brak uprawnień lub wsparcia dla surowych socketów."""
+
+
+def _raw_socket_hint() -> str:
+    """
+    Podpowiedź zależna od systemu.
+
+    Dotąd komunikat mówił "sudo setcap ..." na każdej platformie, więc
+    użytkownik Windowsa dostawał radę, której nie da się wykonać — i, co
+    gorsza, sugerującą, że po jej wykonaniu -sS zadziała. Nie zadziała.
+    """
+    if sys.platform == "win32":
+        return (
+            "Windows blokuje wysyłanie segmentów TCP przez surowe sockety "
+            "(od XP SP2) — i nie zmienia tego uruchomienie jako Administrator. "
+            "Użyj -sT (connect scan), który na Windowsie działa normalnie. "
+            "Pełny -sS wymagałby sterownika Npcap, tak jak w nmapie; "
+            "pynmap-basic go nie używa."
+        )
+    if sys.platform == "darwin":
+        return (
+            "macOS wymaga tu uprawnień roota: sudo python3 -m pynmap -sS ... "
+            "Alternatywa bez roota: -sT (connect scan)."
+        )
+    return (
+        "Uruchom jako root albo nadaj uprawnienie: "
+        "sudo setcap cap_net_raw+ep \"$(readlink -f \"$(which python3)\")\". "
+        "Alternatywa bez roota: -sT (connect scan)."
+    )
 
 
 class SynScanner:
@@ -74,6 +115,13 @@ class SynScanner:
         self.source_port = pick_source_port(opts.source_port)
         self.group_timing = UltraTimingVals.init_for(self.perf, group=True)
 
+        # Kursor round-robin po hostach. Bramka grupowa robi `return` z całej
+        # funkcji, a iteracja startowała zawsze od hosts[0], więc okno było
+        # rozdawane ściśle w kolejności listy celów i hosty z jej końca mogły
+        # nie dostać ani jednej sondy. nmap trzyma ten kursor w UltraScanInfo
+        # (nextI) dokładnie po to.
+        self._next_host_idx = 0
+
         self._send_sock: socket.socket | None = None
         self._tcp_sock: socket.socket | None = None
         self._icmp_sock: socket.socket | None = None
@@ -85,6 +133,13 @@ class SynScanner:
     # -- cykl życia ---------------------------------------------------------
 
     def _open_sockets(self) -> None:
+        if sys.platform == "win32":
+            # Nie próbujemy nawet otwierać socketów: nawet gdy się otworzą
+            # (z prawami Administratora), sendto() z segmentem TCP zwróci
+            # WSAEACCES, bo Windows blokuje to celowo. Lepiej powiedzieć to
+            # od razu, niż wywrócić się w połowie skanu.
+            raise RawSocketError(f"SYN scan (-sS) nie jest wspierany. {_raw_socket_hint()}")
+
         try:
             self._send_sock = socket.socket(
                 socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW
@@ -103,16 +158,14 @@ class SynScanner:
         except PermissionError as exc:
             self._close_sockets()
             raise RawSocketError(
-                "SYN scan (-sS) wymaga uprawnień do surowych socketów (CAP_NET_RAW). "
-                "Uruchom jako root albo nadaj: "
-                "sudo setcap cap_net_raw+ep $(readlink -f $(which python3)). "
-                "Alternatywa bez roota: -sT (connect scan)."
+                "SYN scan (-sS) wymaga uprawnień do surowych socketów "
+                f"(CAP_NET_RAW). {_raw_socket_hint()}"
             ) from exc
         except OSError as exc:
             self._close_sockets()
             if exc.errno in (errno.EPERM, errno.EACCES):
                 raise RawSocketError(
-                    "Brak uprawnień do surowych socketów — użyj -sT albo uruchom jako root."
+                    f"Brak uprawnień do surowych socketów. {_raw_socket_hint()}"
                 ) from exc
             raise RawSocketError(f"Nie udało się otworzyć surowych socketów: {exc}") from exc
 
@@ -203,6 +256,13 @@ class SynScanner:
         reports.sort(key=lambda r: order.get(id(r.target), 0))
         return reports
 
+    def _skip_host(self, host: HostScanStats, reason: str) -> None:
+        """Host nie da się skanować dalej — zapisujemy powód i zamykamy go."""
+        for probe in list(host.outstanding.values()):
+            self._outstanding.pop((host.target.ip, probe.port), None)
+        host.abandon_outstanding()
+        host.skip_reason = reason
+
     # -- faza 1: timeouty ---------------------------------------------------
 
     def _handle_timeouts(self, hosts: list[HostScanStats], now: float) -> None:
@@ -217,23 +277,35 @@ class SynScanner:
             for probe in host.expired_probes(now):
                 self._outstanding.pop((host.target.ip, probe.port), None)
                 host.register_timeout(probe, now)
-                self.group_timing.drop_group(len(self._outstanding) + 1, self.perf, now)
+                self.group_timing.drop_group(
+                    len(self._outstanding) + 1, self.perf, now,
+                    window=host.drop_window(),
+                )
 
     # -- faza 2: wysyłanie --------------------------------------------------
 
     def _send_new_probes(self, hosts: list[HostScanStats], now: float) -> None:
+        if not hosts:
+            return
+
         progress = True
         while progress:
             progress = False
-            for host in hosts:
+            for step in range(len(hosts)):
+                idx = (self._next_host_idx + step) % len(hosts)
+                host = hosts[idx]
+
                 # Grupowe okno zatłoczenia: do tej pory było liczone
                 # (ack/drop_group), ale nigdy nie odpytywane, więc w -sS
                 # tempo ograniczało wyłącznie okno per-host. W -sT ta
                 # bramka jest od początku — teraz oba silniki działają
                 # tak samo.
-                if len(self._outstanding) >= int(self.group_timing.cwnd) + self.perf.low_cwnd:
+                if len(self._outstanding) >= int(self.group_timing.cwnd):
+                    # zapamiętujemy, od kogo wznowić, żeby następne wolne
+                    # miejsce w oknie dostał ten host, a nie znów hosts[0]
+                    self._next_host_idx = idx
                     return
-                if host.timed_out or not host.send_ok(now):
+                if host.timed_out or host.skip_reason or not host.send_ok(now):
                     continue
 
                 port = host.next_port()
@@ -242,6 +314,7 @@ class SynScanner:
 
                 if self._send_syn(host, port, now):
                     progress = True
+                self._next_host_idx = (idx + 1) % len(hosts)
                 now = time.monotonic()
 
     def _send_syn(self, host: HostScanStats, port: int, now: float) -> bool:
@@ -268,14 +341,29 @@ class SynScanner:
                 # bufor nadawczy pełny — port wraca do kolejki
                 host.ports_todo.appendleft(port)
                 return False
-            if exc.errno in (errno.EHOSTUNREACH, errno.ENETUNREACH):
+            if exc.errno in _SEND_UNREACH:
                 host.portlist.set_state(
                     port, PortState.FILTERED,
-                    reason=Reason.HOSTUNREACH if exc.errno == errno.EHOSTUNREACH
-                    else Reason.NETUNREACH,
+                    reason=_SEND_UNREACH[exc.errno],
                 )
                 return True
-            raise
+            if exc.errno in (errno.EPERM, errno.EACCES):
+                # Netfilter odrzucil lokalnie generowany pakiet, czyli reguła
+                # OUTPUT z -j DROP/REJECT na ten cel i port. Dotyczy JEDNEGO
+                # portu, więc odpowiada to dokładnie temu, co -sT robi dla
+                # EACCES/EPERM z connect(): admin-prohibited.
+                host.portlist.set_state(
+                    port, PortState.FILTERED, reason=Reason.ADMINPROHIBITED
+                )
+                return True
+            # Cokolwiek innego dotyczy hosta, nie portu. Gołe `raise` zabijało
+            # tu CAŁY skan — razem z pozostałymi portami tego hosta i ze
+            # wszystkimi innymi celami w przebiegu, łącznie z wynikami już
+            # zmierzonymi. -sT zachowuje się w tej sytuacji inaczej
+            # (_skip_host), więc oba silniki były niespójne.
+            host.ports_todo.appendleft(port)
+            self._skip_host(host, f"sendto(): {exc.strerror or exc}")
+            return False
 
         probe = Probe(
             port=port,
@@ -337,6 +425,20 @@ class SynScanner:
             return
 
         host, probe = entry
+
+        # Na loopbacku NASZ WŁASNY SYN wraca na surowy socket jako pakiet
+        # przychodzący. Gdy skanowany port równa się portowi źródłowemu
+        # (np. -g 9 -p 9), to sport == dport == source_port, więc pakiet
+        # przechodzi filtr po portach; a goły SYN nie ma flagi ACK, więc
+        # omija też walidację ACK == ISN+1 poniżej i wpada w gałąź
+        # "SYN bez ACK" jako syn-ack. Efekt: zamknięty port raportowany
+        # jako OPEN. Nasza sonda rozpoznaje się po własnym ISN.
+        if (
+            probe.seq is not None
+            and tcp.seq == probe.seq
+            and not (tcp.flags & TcpFlags.ACK)
+        ):
+            return
 
         # Walidacja: ACK musi potwierdzać nasz ISN+1 (nmap robi to samo).
         # Surowy socket odbiera cały ruch TCP wchodzący na maszynę, więc bez

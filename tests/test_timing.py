@@ -254,3 +254,78 @@ def test_cc_scale_without_replies_is_neutral():
     perf = ScanPerformanceVars.from_template(TIMING_TEMPLATES[3])
     t = UltraTimingVals.init_for(perf, group=False, now=0.0)
     assert t.cc_scale(perf) == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Jedna fala strat = jedna reakcja (last_drop)
+# ---------------------------------------------------------------------------
+
+
+def test_last_drop_starts_as_never():
+    """
+    Sentinel musi znaczyc "jeszcze nie bylo straty". 0.0 ani biezacy `now`
+    sie do tego nie nadaja: oba sa poprawnymi punktami na skali
+    time.monotonic(), wiec bramka wyciszylaby PIERWSZA reakcje — czyli
+    dokladnie te, ktora ma zadzialac.
+    """
+    perf = ScanPerformanceVars.from_template(TIMING_TEMPLATES[3])
+    t = UltraTimingVals.init_for(perf, group=True, now=1000.0)
+    assert t.last_drop == float("-inf")
+    assert t._already_dropped(1000.0, window=5.0) is False
+
+
+def test_one_timeout_wave_shrinks_group_window_once():
+    """
+    Petla timeoutow wola drop_group osobno dla KAZDEJ wygaslej sondy, a sondy
+    z jednego okna wygasaja w tej samej iteracji. Bez bramki jedna fala
+    zwijala okno wielokrotnie: 10 -> 5 -> 2,5 -> 1,25 -> 1.
+    """
+    perf = ScanPerformanceVars.from_template(TIMING_TEMPLATES[4])
+    t = UltraTimingVals.init_for(perf, group=True, now=1000.0)
+    start = t.cwnd
+
+    for i in range(10):  # cala fala w uamku milisekundy
+        t.drop_group(10 - i, perf, 1000.0 + i * 0.0001, window=0.002)
+
+    assert t.cwnd == start / perf.group_drop_cwnd_divisor
+    assert t.cwnd > float(perf.low_cwnd), "fala zwinela okno do podlogi"
+
+
+def test_later_wave_shrinks_window_again():
+    """Kontrola: bramka wycisza tylko JEDNA fale, nie wylacza reakcji."""
+    perf = ScanPerformanceVars.from_template(TIMING_TEMPLATES[4])
+    t = UltraTimingVals.init_for(perf, group=True, now=1000.0)
+
+    t.drop_group(10, perf, 1000.0, window=0.002)
+    after_first = t.cwnd
+    t.drop_group(10, perf, 1000.5, window=0.002)  # 500 ms pozniej = nowa fala
+
+    assert t.cwnd < after_first
+
+
+def test_window_zero_keeps_old_behaviour():
+    """window <= 0 wylacza bramke, zeby stare wywolania nic nie zmienialy."""
+    perf = ScanPerformanceVars.from_template(TIMING_TEMPLATES[4])
+    t = UltraTimingVals.init_for(perf, group=True, now=1000.0)
+
+    for i in range(10):
+        t.drop_group(10 - i, perf, 1000.0 + i * 0.0001, window=0.0)
+
+    assert t.cwnd == float(perf.low_cwnd)
+
+
+def test_host_drop_wave_does_not_multiply_ssthresh():
+    """
+    drop() z definicji zwija cwnd do low_cwnd od pierwszego wywolania — to
+    jest "ostra reakcja" jak po RTO. Bramka ma chronic ssthresh przed
+    wielokrotnym dzieleniem w tej samej fali.
+    """
+    perf = ScanPerformanceVars.from_template(TIMING_TEMPLATES[3])
+    t = UltraTimingVals.init_for(perf, group=False, now=1000.0)
+
+    t.drop(30, perf, 1000.0, window=0.002)
+    after_first = t.ssthresh
+    for i in range(9):
+        t.drop(30, perf, 1000.0 + i * 0.0001, window=0.002)
+
+    assert t.ssthresh == after_first

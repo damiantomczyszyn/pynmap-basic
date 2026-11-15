@@ -137,6 +137,11 @@ def _load_nmap_services(path: str) -> tuple[dict[int, str], dict[str, int], tupl
             if proto.strip().lower() != "tcp" or not port_s.isdigit():
                 continue
             port = int(port_s)
+            # Plik wskazuje użytkownik (--services / PYNMAP_SERVICES), więc to
+            # wejście jak każde inne. Bez tego porty 0 albo 99999 trafiały
+            # prosto do silnika i connect_ex() wywracał skan OverflowError-em.
+            if not 1 <= port <= 65535:
+                continue
 
             freq = 0.0
             if len(fields) >= 3:
@@ -153,10 +158,20 @@ def _load_nmap_services(path: str) -> tuple[dict[int, str], dict[str, int], tupl
     return port_to_name, name_to_port, tuple(port for _freq, port in freqs)
 
 
+class ServiceDBError(ValueError):
+    """Nie udało się wczytać bazy usług wskazanej jawnie przez użytkownika."""
+
+
 class ServiceDB:
     """
     Baza usług. Preferuje systemowy nmap-services, w razie braku używa
     wbudowanej listy.
+
+    Rozróżnienie jest istotne: plik WYSZUKANY w systemie może się nie udać
+    i wtedy cicho wracamy do listy wbudowanej, ale plik podany JAWNIE przez
+    --services (albo PYNMAP_SERVICES) musi być błędem. Inaczej literówka
+    w ścieżce dawała --top-ports N liczone z innej bazy niż zamówiona,
+    bez słowa ostrzeżenia.
     """
 
     def __init__(self, services_path: str | None = None, prefer_system: bool = True):
@@ -165,18 +180,30 @@ class ServiceDB:
         self._name_to_port: dict[str, int]
         self._ranked: list[int]
 
+        explicit = services_path is not None
         path = services_path or (find_nmap_services() if prefer_system else None)
         if path:
             try:
                 p2n, n2p, ranked = _load_nmap_services(path)
+            except OSError as exc:
+                if explicit:
+                    raise ServiceDBError(
+                        f"nie udało się odczytać bazy usług '{path}': "
+                        f"{exc.strerror or exc}"
+                    ) from exc
+                ranked = ()
+            else:
                 if ranked:
                     self._port_to_name = p2n
                     self._name_to_port = n2p
                     self._ranked = list(ranked)
                     self.source = path
                     return
-            except OSError:
-                pass
+            if explicit:
+                raise ServiceDBError(
+                    f"baza usług '{path}' nie zawiera ani jednego poprawnego "
+                    "wpisu TCP"
+                )
 
         p2n, n2p, order = _builtin_tables()
         self._port_to_name = dict(p2n)

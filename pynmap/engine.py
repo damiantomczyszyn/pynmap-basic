@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import random
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from .constants import (
     DEFAULT_MAX_SOCKETS,
     MAX_EPHEMERAL_PORT,
     MIN_EPHEMERAL_PORT,
+    WINDOWS_MAX_SOCKETS,
     PortState,
     Reason,
     ScanType,
@@ -208,6 +210,17 @@ class HostScanStats:
         """
         return max(self.to.timeout_s, self.opts.timing.min_rtt_timeout_ms / 1000.0)
 
+    def drop_window(self) -> float:
+        """
+        Jak długo po zmniejszeniu okna ignorujemy kolejne straty z tej fali.
+
+        Jedna fala timeoutów to jedna reakcja, jak w TCP. Okno bierzemy
+        z estymaty RTT; dopóki jej nie ma, z bieżącego timeoutu sondy.
+        """
+        if self.to.srtt < 0:
+            return self.probe_timeout_s()
+        return max(self.to.srtt / 1_000_000.0, 0.001)
+
     def host_timed_out(self, now: float) -> bool:
         limit = self.opts.host_timeout_s or (self.opts.timing.host_timeout_ms / 1000.0)
         if limit <= 0:
@@ -315,7 +328,9 @@ class HostScanStats:
         wyczerpaliśmy próby i port zostaje oznaczony jako filtered.
         """
         self.outstanding.pop(probe.key, None)
-        self.timing.drop(self.in_flight + 1, self.perf, now)
+        self.timing.drop(
+            self.in_flight + 1, self.perf, now, window=self.drop_window()
+        )
 
         max_retries = self.opts.effective_max_retries()
         if probe.tryno < max_retries:
@@ -431,6 +446,11 @@ def max_sockets_allowed() -> int:
     nmap czyta getrlimit(RLIMIT_NOFILE) i zostawia zapas (MAX_SOCKETS);
     robimy to samo, bo connect scan to głównie zarządzanie deskryptorami.
     """
+    if sys.platform == "win32":
+        # Tam ogranicza nas nie RLIMIT_NOFILE (nie ma go), a FD_SETSIZE
+        # w select(); patrz WINDOWS_MAX_SOCKETS w constants.py.
+        return WINDOWS_MAX_SOCKETS
+
     if resource is None:
         return DEFAULT_MAX_SOCKETS
 
