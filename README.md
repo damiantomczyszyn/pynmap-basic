@@ -98,6 +98,29 @@ współdzielonej lepiej użyć `sudo` albo osobnego venv-a z własnym binarium.
 
 Bez tych uprawnień `-sT` działa normalnie i nie wymaga niczego.
 
+### Windows i macOS
+
+| | `-sT` | `-sS` |
+|---|---|---|
+| Linux | działa | wymaga `CAP_NET_RAW` |
+| macOS | działa | wymaga `sudo` |
+| Windows | działa | **niedostępny** — patrz niżej |
+
+Na Windowsie `-sS` nie jest i nie będzie wspierany bez Npcapa: system
+blokuje wysyłanie segmentów TCP przez surowe sockety od XP SP2 i nie zmienia
+tego uruchomienie jako Administrator. `pynmap -sS` mówi to wprost, zamiast
+podsuwać linuksowe `setcap`.
+
+Jeśli coś zachowuje się inaczej niż tutaj opisane, pomaga wynik:
+
+```bash
+python3 ci/platform_probe.py
+```
+
+Skrypt wypisuje kody błędów `connect()`, wsparcie surowych socketów, typ
+selektora i układ `struct linger` na danym systemie. Nie wymaga uprawnień
+i nie wysyła pakietów poza `localhost`.
+
 ---
 
 ## Użycie
@@ -190,7 +213,7 @@ docs/
   port-states.md         tablice decyzyjne errno/flagi -> stan portu
   rozszerzenia.md        plan dojścia do nmapa: tryby, fazy, koszty
 
-tests/                   291 testów (pytest)
+tests/                   311 testów (pytest)
 ```
 
 ---
@@ -233,7 +256,7 @@ pip install pytest
 python3 -m pytest tests/ -v
 ```
 
-291 testów. Pokrywają m.in.:
+311 testów. Pokrywają m.in.:
 
 - zgodność estymatora RTT z wzorami z `timing.cc` (łącznie z zachowaniem
   przesunięć bitowych na liczbach ujemnych),
@@ -282,7 +305,9 @@ uprawnień, więc `pytest` przechodzi też na zwykłym koncie.
 - IPv6 w SYN scanie (`-sT` obsługuje oba)
 - rate limitingu (`--min-rate` / `--max-rate`)
 - wysyłania ramek ethernetowych i ARP
-- obsługi Windows (surowe sockety wymagają tam Npcap)
+- `-sS` na Windowsie — system blokuje wysyłanie segmentów TCP przez surowe
+  sockety od XP SP2, niezależnie od praw administratora, więc byłby potrzebny
+  Npcap (tak jak w nmapie). `-sT` na Windowsie działa.
 - wyjścia XML (`-oX`) — mamy JSON
 
 Pełna lista z uzasadnieniem: [`docs/c-vs-python.md`](docs/c-vs-python.md#4-czego-wersja-w-pythonie-nie-ma).

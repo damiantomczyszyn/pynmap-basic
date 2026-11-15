@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import random
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from .constants import (
     DEFAULT_MAX_SOCKETS,
     MAX_EPHEMERAL_PORT,
     MIN_EPHEMERAL_PORT,
+    WINDOWS_MAX_SOCKETS,
     PortState,
     Reason,
     ScanType,
@@ -431,6 +433,11 @@ def max_sockets_allowed() -> int:
     nmap czyta getrlimit(RLIMIT_NOFILE) i zostawia zapas (MAX_SOCKETS);
     robimy to samo, bo connect scan to głównie zarządzanie deskryptorami.
     """
+    if sys.platform == "win32":
+        # Tam ogranicza nas nie RLIMIT_NOFILE (nie ma go), a FD_SETSIZE
+        # w select(); patrz WINDOWS_MAX_SOCKETS w constants.py.
+        return WINDOWS_MAX_SOCKETS
+
     if resource is None:
         return DEFAULT_MAX_SOCKETS
 

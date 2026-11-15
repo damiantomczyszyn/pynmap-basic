@@ -27,6 +27,7 @@ import errno
 import os
 import selectors
 import socket
+import sys
 import time
 
 from .constants import SYN_PROBE_MSS, SYN_PROBE_WINDOW, PortState, Reason, ScanType, TcpFlags
@@ -59,6 +60,34 @@ class RawSocketError(RuntimeError):
     """Brak uprawnień lub wsparcia dla surowych socketów."""
 
 
+def _raw_socket_hint() -> str:
+    """
+    Podpowiedź zależna od systemu.
+
+    Dotąd komunikat mówił "sudo setcap ..." na każdej platformie, więc
+    użytkownik Windowsa dostawał radę, której nie da się wykonać — i, co
+    gorsza, sugerującą, że po jej wykonaniu -sS zadziała. Nie zadziała.
+    """
+    if sys.platform == "win32":
+        return (
+            "Windows blokuje wysyłanie segmentów TCP przez surowe sockety "
+            "(od XP SP2) — i nie zmienia tego uruchomienie jako Administrator. "
+            "Użyj -sT (connect scan), który na Windowsie działa normalnie. "
+            "Pełny -sS wymagałby sterownika Npcap, tak jak w nmapie; "
+            "pynmap-basic go nie używa."
+        )
+    if sys.platform == "darwin":
+        return (
+            "macOS wymaga tu uprawnień roota: sudo python3 -m pynmap -sS ... "
+            "Alternatywa bez roota: -sT (connect scan)."
+        )
+    return (
+        "Uruchom jako root albo nadaj uprawnienie: "
+        "sudo setcap cap_net_raw+ep \"$(readlink -f \"$(which python3)\")\". "
+        "Alternatywa bez roota: -sT (connect scan)."
+    )
+
+
 class SynScanner:
     """
     Silnik SYN scanu.
@@ -85,6 +114,13 @@ class SynScanner:
     # -- cykl życia ---------------------------------------------------------
 
     def _open_sockets(self) -> None:
+        if sys.platform == "win32":
+            # Nie próbujemy nawet otwierać socketów: nawet gdy się otworzą
+            # (z prawami Administratora), sendto() z segmentem TCP zwróci
+            # WSAEACCES, bo Windows blokuje to celowo. Lepiej powiedzieć to
+            # od razu, niż wywrócić się w połowie skanu.
+            raise RawSocketError(f"SYN scan (-sS) nie jest wspierany. {_raw_socket_hint()}")
+
         try:
             self._send_sock = socket.socket(
                 socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW
@@ -103,16 +139,14 @@ class SynScanner:
         except PermissionError as exc:
             self._close_sockets()
             raise RawSocketError(
-                "SYN scan (-sS) wymaga uprawnień do surowych socketów (CAP_NET_RAW). "
-                "Uruchom jako root albo nadaj: "
-                "sudo setcap cap_net_raw+ep $(readlink -f $(which python3)). "
-                "Alternatywa bez roota: -sT (connect scan)."
+                "SYN scan (-sS) wymaga uprawnień do surowych socketów "
+                f"(CAP_NET_RAW). {_raw_socket_hint()}"
             ) from exc
         except OSError as exc:
             self._close_sockets()
             if exc.errno in (errno.EPERM, errno.EACCES):
                 raise RawSocketError(
-                    "Brak uprawnień do surowych socketów — użyj -sT albo uruchom jako root."
+                    f"Brak uprawnień do surowych socketów. {_raw_socket_hint()}"
                 ) from exc
             raise RawSocketError(f"Nie udało się otworzyć surowych socketów: {exc}") from exc
 
