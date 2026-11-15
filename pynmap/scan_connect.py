@@ -125,10 +125,45 @@ if hasattr(errno, "EWOULDBLOCK"):
     _IN_PROGRESS.add(errno.EWOULDBLOCK)
 _IN_PROGRESS.update({_WSAEWOULDBLOCK, _WSAEINPROGRESS, _WSAEALREADY})
 
+if sys.platform == "win32":
+    # Na Windowsie Python aliasuje socketowe nazwy POSIX na WARTOSCI Winsock:
+    # zmierzone na 3.12.10 -> errno.ECONNREFUSED == 10061, nie 111. Z tego
+    # wynika, ze errno.EWOULDBLOCK == WSAEWOULDBLOCK == 10035, czyli kod
+    # "connect() w toku".
+    #
+    # Wpis EAGAIN/EWOULDBLOCK -> open jest natomiast quirkiem PETLI LOKALNEJ
+    # LINUKSA (patrz docs/port-states.md, sekcja 1). Na Windowsie oznaczalby,
+    # ze każde polaczenie W TRAKCIE zestawiania jest raportowane jako port
+    # otwarty — czyli falszywe `open` dla portow, ktore moga byc zamkniete.
+    for _code in (errno.EAGAIN, errno.EWOULDBLOCK):
+        _ERRNO_MAP.pop(_code, None)
+
 
 def classify_connect_errno(code: int) -> tuple[PortState, Reason]:
     """Tłumaczy errno z connect()/SO_ERROR na stan portu."""
     return _ERRNO_MAP.get(code, (PortState.UNKNOWN, Reason.UNKNOWN))
+
+
+def connection_established(sock: socket.socket) -> bool:
+    """
+    Czy gniazdo MA faktycznie zestawione połączenie.
+
+    `SO_ERROR == 0` samo w sobie tego nie dowodzi. Pomiar na Windowsie
+    (Python 3.12.10) pokazał gniazdo zgłoszone jako gotowe do zapisu,
+    dla którego SO_ERROR zwracał 0, mimo że port był zamknięty — a
+    `_ERRNO_MAP[0]` to `open`, więc zaufanie samemu SO_ERROR dawało
+    FAŁSZYWE `open`. Dla skanera portów to najgorszy możliwy błąd:
+    raportuje usługę, której nie ma.
+
+    getpeername() odpowiada na to pytanie wprost: bez połączenia rzuca
+    ENOTCONN (na Windowsie WSAENOTCONN). To klasyczny, przenośny sposób
+    potwierdzenia nieblokującego connect().
+    """
+    try:
+        sock.getpeername()
+    except OSError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +413,18 @@ class ConnectScanner:
                 code = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
             except OSError as exc:
                 code = exc.errno or errno.ETIMEDOUT
+
+            if code == 0 and not connection_established(sock):
+                # SO_ERROR mówi "bez błędu", ale połączenia NIE MA, więc to
+                # nie jest otwarty port. Ponowne czytanie SO_ERROR nic nie da:
+                # jądro czyści je przy pierwszym odczycie (zmierzone — dla
+                # zamkniętego portu 1. czytanie daje ECONNREFUSED, 2. już 0).
+                # Nie mamy więc użytecznej odpowiedzi i NIE wymyślamy stanu:
+                # port idzie normalną ścieżką retransmisji, a po wyczerpaniu
+                # prób dostanie filtered/no-response.
+                host.register_timeout(probe, now)
+                sock.close()
+                continue
 
             state, reason = classify_connect_errno(code)
 

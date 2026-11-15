@@ -111,6 +111,20 @@ blokuje wysyłanie segmentów TCP przez surowe sockety od XP SP2 i nie zmienia
 tego uruchomienie jako Administrator. `pynmap -sS` mówi to wprost, zamiast
 podsuwać linuksowe `setcap`.
 
+Dwie rzeczy, które na Windowsie zachowują się inaczej, niż podpowiada
+intuicja z Linuksa — obie zmierzone, obie obsłużone:
+
+* **`errno` dla socketów ma tam wartości Winsock.** `errno.ECONNREFUSED`
+  to `10061`, a nie POSIX-owe `111`. Z tego wynika, że
+  `errno.EWOULDBLOCK == WSAEWOULDBLOCK == 10035`, czyli kod „`connect()`
+  w toku" — więc linuksowy quirk `EAGAIN → open` **nie może** tam
+  obowiązywać, bo zamieniłby każde trwające połączenie w port otwarty.
+* **`SO_ERROR == 0` nie dowodzi, że połączenie istnieje.** Zmierzono
+  gniazdo zgłoszone jako gotowe do zapisu, z `SO_ERROR` równym 0, dla portu
+  zamkniętego. Ponieważ `0` mapuje się na `open`, zaufanie samemu `SO_ERROR`
+  dawało **fałszywą usługę** w raporcie. Potwierdzamy więc połączenie
+  przez `getpeername()`.
+
 Jeśli coś zachowuje się inaczej niż tutaj opisane, pomaga wynik:
 
 ```bash
@@ -213,7 +227,7 @@ docs/
   port-states.md         tablice decyzyjne errno/flagi -> stan portu
   rozszerzenia.md        plan dojścia do nmapa: tryby, fazy, koszty
 
-tests/                   341 testów (pytest)
+tests/                   349 testów (pytest)
 ```
 
 ---
@@ -256,7 +270,7 @@ pip install pytest
 python3 -m pytest tests/ -v
 ```
 
-341 testów. Pokrywają m.in.:
+349 testów. Pokrywają m.in.:
 
 - zgodność estymatora RTT z wzorami z `timing.cc` (łącznie z zachowaniem
   przesunięć bitowych na liczbach ujemnych),
@@ -290,7 +304,9 @@ python3 -m pytest tests/ -v
   (`-g 9 -p 9` na zamkniętym porcie nie może dać `open`),
 - że trwały brak deskryptorów kończy hosta, a nie zapętla skan,
 - że wartości idące do pól nagłówka (`--ttl`, `-g`, `-S`) są walidowane,
-  zamiast kończyć skan tracebackiem.
+  zamiast kończyć skan tracebackiem,
+- że `SO_ERROR == 0` bez faktycznego połączenia **nie** daje `open` —
+  pomiar na Windowsie pokazał dokładnie taki przypadek.
 
 Testy SYN scanu wymagające `CAP_NET_RAW` są automatycznie pomijane bez
 uprawnień, więc `pytest` przechodzi też na zwykłym koncie.
