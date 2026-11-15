@@ -90,6 +90,42 @@ Po wyczerpaniu `max_retries` port dostaje **filtered** / `no-response`.
 To jest stan domyślny ustawiany przez `PortList.finalize()` — odpowiednik
 `set_default_port_state()` z `scan_engine.cc`.
 
+### Błąd `sendto()`, czyli zanim pakiet w ogóle wyjdzie
+
+Tej tabeli długo tu brakowało — i ten brak miał konsekwencje. `-sT` od
+początku mapował `EPERM`/`EACCES` na **filtered** / `admin-prohibited`
+(tabela w sekcji 1), a `-sS` na ten sam błąd **przewracał cały skan**
+gołym `raise`, razem z pozostałymi portami, wszystkimi innymi celami
+i wynikami już zmierzonymi. Czyli dwa silniki łamały ten sam kontrakt
+w dwie różne strony, a nic tego nie pilnowało.
+
+Kluczowe jest rozróżnienie **zasięgu** błędu — czy dotyczy jednego portu,
+jednego hosta, czy całego przebiegu:
+
+| `errno` | Zasięg | Stan | Powód | Skąd się bierze |
+|---|---|---|---|---|
+| `EPERM` | **port** | filtered | `admin-prohibited` | netfilter odrzucił lokalnie generowany pakiet (`OUTPUT -j DROP/REJECT`) |
+| `EACCES` | **port** | filtered | `admin-prohibited` | np. broadcast bez `SO_BROADCAST` |
+| `EHOSTUNREACH` | port | filtered | `host-unreach` | brak trasy do hosta |
+| `ENETUNREACH` | port | filtered | `net-unreach` | brak trasy do sieci |
+| `EHOSTDOWN` | host | filtered | `no-response` | sąsiad nie odpowiada |
+| `ENETDOWN` | host | filtered | `net-unreach` | interfejs/trasa położone |
+| `ENOBUFS`, `EAGAIN` | chwila | — | — | pełny bufor nadawczy: port **wraca do kolejki** |
+| pozostałe | host | — | — | pomijamy **hosta** (`_skip_host`), jak `-sT` |
+
+Dwie uwagi z pomiarów, bo oba te punkty łatwo wziąć na odwrót:
+
+* **`EPERM` z reguły firewalla ma zasięg tak wąski, jak sama reguła.**
+  `iptables -A OUTPUT -p tcp -d 127.0.0.1 --dport 81 -j DROP` daje `EPERM`
+  wyłącznie dla portu 81; port 80 wychodzi normalnie. Reguła bez `--dport`
+  obejmuje każdy port tego hosta. Nigdy nie jest to powód, by przerwać
+  cały skan.
+* **`EINVAL` to jedyny przypadek, w którym głośna śmierć jest właściwa** —
+  oznacza, że *my* zbudowaliśmy niepoprawny nagłówek przy `IP_HDRINCL`,
+  więc błąd powtórzy się identycznie dla każdej sondy. `EAFNOSUPPORT` nie
+  jest tu osiągalny: to błąd `socket()`, nie `sendto()`, więc występuje
+  w `-sT` (przy tworzeniu gniazda), a nie w `-sS`.
+
 ---
 
 ## 3. Dlaczego „filtered" to nie „zamknięte"

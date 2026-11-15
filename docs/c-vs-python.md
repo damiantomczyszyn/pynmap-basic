@@ -427,6 +427,39 @@ w stronę pętli po tablicach.
 
 ---
 
+## 3b. Ten sam błąd, dwa języki: wyczerpanie deskryptorów
+
+Najciekawsza rozbieżność, jaką dał ten projekt — bo wyszła z przeglądu
+kodu Pythona, a dotyczyła **obu** implementacji, i w C objawiała się
+gorzej.
+
+Gdy `socket()` zwraca `EMFILE`/`ENFILE`, port wraca do kolejki i czekamy,
+aż jakaś sonda zwolni deskryptor. Problem pojawia się, kiedy w powietrzu
+nie ma **ani jednej** sondy: nie ma kto zwolnić deskryptora, a mimo to
+`work_left()` jest nadal prawdziwe, bo port leży na stosie retransmisji.
+
+Zmierzone, `socket()` zawodzący bezwarunkowo (`LD_PRELOAD` dla C,
+podmiana `socket.socket` dla Pythona):
+
+| | przed poprawką | po poprawce |
+|---|---|---|
+| C | **wisi w nieskończoność**, nic nie wypisuje | `brak wolnych deskryptorów (...) — zwiększ ulimit -n`, kod 0 |
+| Python | **wisi w nieskończoność**, 100% CPU | `Skipping 127.0.0.1 (brak wolnych deskryptorów: ...)`, kod 0 |
+
+Przy zwykłym `ulimit -n 10` Python wisiał, a C **nie** — bo trzyma mniej
+deskryptorów naraz i zdąża je zwolnić. Trzeba było dopiero całkowicie
+zablokować `socket()`, żeby pokazać, że ta sama luka logiczna siedzi
+w obu. Wniosek metodologiczny: *objaw* zależy od szczegółów implementacji
+(ile gniazd trzyma pętla), a *błąd* jest w algorytmie i siedzi w obu
+językach. Łatwo uznać, że „w C działa", gdy test po prostu nie dociska
+właściwego miejsca.
+
+W obu wersjach poprawka jest ta sama: licznik kolejnych porażek `socket()`
+przy zerowej liczbie sond w locie (`_FD_FAILURE_LIMIT` / `FD_FAILURE_LIMIT`,
+w obu 3) i wyjście z czytelnym komunikatem zamiast kręcenia się.
+
+---
+
 ## 4. Czego wersja w Pythonie nie ma
 
 Uczciwe porównanie wymaga wymienienia, co odpuściłem:

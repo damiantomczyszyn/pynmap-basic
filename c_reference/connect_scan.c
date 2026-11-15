@@ -315,6 +315,11 @@ static bool seen_add(unsigned char *seen, int port)
     return true;
 }
 
+/* Ile razy pod rzad tolerujemy porazke socket() przy zerowej liczbie sond
+ * w locie, zanim uznamy skan za niewykonalny. Tyle samo co w wersji
+ * w Pythonie (_FD_FAILURE_LIMIT w pynmap/scan_connect.py). */
+#define FD_FAILURE_LIMIT 3
+
 static int parse_ports(const char *spec, int *ports, int max_ports)
 {
     char *copy, *token, *saveptr;
@@ -429,11 +434,20 @@ struct scanner {
 
     int                *retry_stack;
     int                 retry_count;
+    bool                aborted;
     int                *tryno;          /* indeksowane numerem portu */
 
     struct probe       *probes;
     int                 probe_capacity;
     int                 in_flight;
+    /* Ile razy pod rzad socket() zawiodl, nie majac ani jednej sondy w locie.
+     * Bez takiego licznika nie ma kto zwolnic deskryptora: port wracal na
+     * retry_stack bez podniesienia tryno, launch_probe() zwracal false,
+     * wait_for_responses() mialo maxfd < 0 i tylko spalo 1 ms, work_left()
+     * bylo nadal prawdziwe — i petla glowna krecila sie bez konca, nie
+     * wypisujac nic i nie konczac sie. Wersja w Pythonie wychodzi w tej
+     * sytuacji z czytelnym komunikatem (patrz docs/c-vs-python.md). */
+    int                 fd_failures;
 
     struct port_result *results;
 
@@ -511,11 +525,23 @@ static bool launch_probe(struct scanner *sc, int port, const struct timeval *now
         if (errno == EMFILE || errno == ENFILE) {
             /* brak deskryptorów — port wraca do kolejki */
             sc->retry_stack[sc->retry_count++] = port;
+            if (sc->in_flight > 0) {
+                /* cos leci i zwolni deskryptor — warto poczekac */
+                return false;
+            }
+            if (++sc->fd_failures >= FD_FAILURE_LIMIT) {
+                fprintf(stderr,
+                        "connect_scan: brak wolnych deskryptorow (%s) — "
+                        "zwieksz ulimit -n\n", strerror(errno));
+                sc->aborted = true;
+            }
             return false;
         }
         perror("socket");
         return false;
     }
+
+    sc->fd_failures = 0;
 
     flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
@@ -681,6 +707,9 @@ static void wait_for_responses(struct scanner *sc)
 
 static bool work_left(const struct scanner *sc)
 {
+    if (sc->aborted)
+        return false;   /* nie ma jak zrobic postepu — patrz fd_failures */
+
     return sc->next_port_idx < sc->port_count ||
            sc->retry_count > 0 ||
            sc->in_flight > 0;
