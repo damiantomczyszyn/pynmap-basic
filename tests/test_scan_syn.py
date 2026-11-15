@@ -55,13 +55,13 @@ def _opts(ports):
     )
 
 
-def _fake_tcp_reply(src_ip, dst_ip, sport, dport, flags, ack=0, ttl=64):
+def _fake_tcp_reply(src_ip, dst_ip, sport, dport, flags, ack=0, ttl=64, seq=0):
     """Składa pakiet IP+TCP tak, jak zobaczyłby go surowy socket."""
     from pynmap.tcpip import build_ip_header
 
     tcp = struct.pack(
         "!HHIIBBHHH",
-        sport, dport, 0, ack, 5 << 4, int(flags), 1024, 0, 0,
+        sport, dport, seq, ack, 5 << 4, int(flags), 1024, 0, 0,
     )
     ip = build_ip_header(src_ip, dst_ip, len(tcp), socket.IPPROTO_TCP, ttl=ttl)
     return ip + tcp
@@ -310,7 +310,11 @@ def test_group_cwnd_limits_probes_in_flight():
     scanner._send_syn = fake_send
     scanner._send_new_probes(hosts, now)
 
-    gate = int(scanner.group_timing.cwnd) + perf.low_cwnd
+    # UWAGA: prog liczymy wg KONTRAKTU (int(cwnd)), a nie przez powtorzenie
+    # wyrazenia z kodu. Poprzednia wersja asercji uzywala formuly
+    # int(cwnd) + low_cwnd, czyli dokladnie tej, ktora byla bledna — wiec
+    # przechodzila takze po przywroceniu bledu.
+    gate = int(scanner.group_timing.cwnd)
     in_flight = len(scanner._outstanding)
 
     assert in_flight <= gate, f"{in_flight} sond w locie przy bramce {gate}"
@@ -350,3 +354,127 @@ def test_group_cwnd_actually_grows():
     assert group.num_replies_expected == 200
     assert group.cc_scale(perf) == pytest.approx(1.0)
     assert group.cwnd > start, "grupowe cwnd nie rosnie, wiec bramka to staly sufit"
+
+
+# ---------------------------------------------------------------------------
+# Wlasna sonda nie moze byc policzona jako odpowiedz
+# ---------------------------------------------------------------------------
+
+
+@requires_raw
+def test_own_syn_echoed_back_is_not_a_reply():
+    """
+    Na loopbacku nasz wlasny SYN wraca na surowy socket jako pakiet
+    przychodzacy. Gdy skanowany port rowna sie portowi zrodlowemu
+    (pynmap -sS -p 9 -g 9), to sport == dport, wiec pakiet przechodzil filtr
+    po portach; goly SYN nie ma ACK, wiec omijal takze walidacje ACK == ISN+1
+    i wpadal w galez "SYN bez ACK" jako syn-ack. Efekt: ZAMKNIETY port
+    raportowany jako open.
+    """
+    from pynmap.engine import HostScanStats, Probe
+
+    opts = _opts([9])
+    scanner = SynScanner(opts)
+    scanner.source_port = 9
+    host = HostScanStats(Target(ip="127.0.0.1"), opts, opts.build_perf(), now=0.0)
+    probe = Probe(
+        port=9, tryno=0, sent_at=0.0, timeout_at=99.0, seq=424242, sport=9
+    )
+    host.register_sent(probe, 0.0)
+    scanner._outstanding[("127.0.0.1", 9)] = (host, probe)
+
+    # dokladnie nasz wlasny pakiet: ten sam ISN, sam SYN, sport == dport
+    own = _fake_tcp_reply(
+        "127.0.0.1", "127.0.0.1", sport=9, dport=9,
+        flags=TcpFlags.SYN, seq=424242,
+    )
+    scanner._handle_tcp_packet(own, now=0.01)
+
+    assert 9 not in host.portlist.results, "wlasna sonda policzona jako odpowiedz"
+    assert ("127.0.0.1", 9) in scanner._outstanding, "sonda zdjeta z kolejki"
+
+
+@requires_raw
+def test_genuine_synack_on_same_port_still_counts():
+    """Kontrola: prawdziwy SYN/ACK musi dalej dawac open, takze przy -g == -p."""
+    from pynmap.engine import HostScanStats, Probe
+
+    opts = _opts([9])
+    scanner = SynScanner(opts)
+    scanner.source_port = 9
+    host = HostScanStats(Target(ip="127.0.0.1"), opts, opts.build_perf(), now=0.0)
+    probe = Probe(
+        port=9, tryno=0, sent_at=0.0, timeout_at=99.0, seq=424242, sport=9
+    )
+    host.register_sent(probe, 0.0)
+    scanner._outstanding[("127.0.0.1", 9)] = (host, probe)
+
+    reply = _fake_tcp_reply(
+        "127.0.0.1", "127.0.0.1", sport=9, dport=9,
+        flags=TcpFlags.SYN | TcpFlags.ACK, ack=424243, seq=999999,
+    )
+    scanner._handle_tcp_packet(reply, now=0.01)
+
+    assert host.portlist.get(9).state is PortState.OPEN
+
+
+@requires_raw
+def test_rst_on_same_port_still_counts():
+    """A RST (zamkniety port) tez musi przejsc, mimo -g == -p."""
+    from pynmap.engine import HostScanStats, Probe
+
+    opts = _opts([9])
+    scanner = SynScanner(opts)
+    scanner.source_port = 9
+    host = HostScanStats(Target(ip="127.0.0.1"), opts, opts.build_perf(), now=0.0)
+    probe = Probe(
+        port=9, tryno=0, sent_at=0.0, timeout_at=99.0, seq=424242, sport=9
+    )
+    host.register_sent(probe, 0.0)
+    scanner._outstanding[("127.0.0.1", 9)] = (host, probe)
+
+    reply = _fake_tcp_reply(
+        "127.0.0.1", "127.0.0.1", sport=9, dport=9,
+        flags=TcpFlags.RST | TcpFlags.ACK, ack=424243, seq=0,
+    )
+    scanner._handle_tcp_packet(reply, now=0.01)
+
+    assert host.portlist.get(9).state is PortState.CLOSED
+
+
+def test_max_parallelism_one_is_really_serial():
+    """
+    -T0, -T1, -T2 oraz jawne --max-parallelism 1 ustawiaja okno na 1.
+    Bramka `>= int(cwnd) + low_cwnd` przepuszczala DWIE sondy naraz,
+    czyli dwukrotnosc tempa, o ktore prosi szablon wybierany wlasnie po to,
+    zeby byc cichym.
+    """
+    from pynmap.engine import HostScanStats, Probe
+
+    opts = ScanOptions(
+        scan_type=ScanType.SYN,
+        ports=list(range(1, 51)),
+        timing=TIMING_TEMPLATES[3],
+        randomize_ports=False,
+        resolve_dns=False,
+        max_parallelism=1,
+    )
+    perf = opts.build_perf()
+    scanner = SynScanner(opts, perf)
+    now = time.monotonic()
+    host = HostScanStats(Target(ip="192.0.2.1"), opts, perf, now=now)
+    host.source_ip = "192.0.2.254"
+
+    def fake_send(host_, port, when):
+        probe = Probe(port=port, tryno=0, sent_at=when,
+                      timeout_at=when + 10.0, seq=1, sport=40000)
+        host_.register_sent(probe, when, group=scanner.group_timing)
+        scanner._outstanding[(host_.target.ip, port)] = (host_, probe)
+        return True
+
+    scanner._send_syn = fake_send
+    scanner._send_new_probes([host], now)
+
+    assert len(scanner._outstanding) == 1, (
+        f"--max-parallelism 1 przepuscilo {len(scanner._outstanding)} sond"
+    )

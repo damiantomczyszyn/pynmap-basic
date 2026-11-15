@@ -295,10 +295,33 @@ static void tv_add_us(struct timeval *tv, long usec)
 /* Parsowanie portów — odpowiednik getpts()                            */
 /* ------------------------------------------------------------------ */
 
+/* Mapa bitowa "port juz dodany" — 8 KB, wiec spokojnie na stosie.
+ * Wersja w Pythonie trzyma porty w set(), wiec '22,22,80' daje tam DWA porty.
+ * Tutaj kazde wystapienie dopisywalo osobny wpis, a record_result()
+ * aktualizuje tylko PIERWSZY wpis o danym numerze i wraca — duplikaty
+ * zostawaly ze stanem domyslnym (filtered/no-response). Raport pokazywal
+ * wiec ten sam port dwa razy, w dwoch sprzecznych stanach, a podsumowanie
+ * liczylo porty, ktorych nie ma. */
+#define SEEN_BYTES ((MAX_PORTS + 8) / 8)
+
+static bool seen_add(unsigned char *seen, int port)
+{
+    const int idx = port >> 3;
+    const unsigned char bit = (unsigned char)(1u << (port & 7));
+
+    if (seen[idx] & bit)
+        return false;
+    seen[idx] |= bit;
+    return true;
+}
+
 static int parse_ports(const char *spec, int *ports, int max_ports)
 {
     char *copy, *token, *saveptr;
     int count = 0;
+    unsigned char seen[SEEN_BYTES];
+
+    memset(seen, 0, sizeof(seen));
 
     copy = strdup(spec);
     if (copy == NULL) {
@@ -331,7 +354,8 @@ static int parse_ports(const char *spec, int *ports, int max_ports)
                 return -1;
             }
             for (int p = lo; p <= hi && count < max_ports; p++)
-                ports[count++] = p;
+                if (seen_add(seen, p))
+                    ports[count++] = p;
         } else {
             int p = atoi(token);
 
@@ -340,7 +364,7 @@ static int parse_ports(const char *spec, int *ports, int max_ports)
                 free(copy);
                 return -1;
             }
-            if (count < max_ports)
+            if (count < max_ports && seen_add(seen, p))
                 ports[count++] = p;
         }
         token = strtok_r(NULL, ",", &saveptr);

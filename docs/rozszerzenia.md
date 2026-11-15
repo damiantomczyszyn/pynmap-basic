@@ -361,11 +361,24 @@ Rzeczy, które nie dodają trybów, ale zmieniają to, ile można kodowi zaufać
   `-p -`) nie został złapany przez 164 testy, bo żaden nie mierzył czasu
   na dużym wejściu. Jeden test z progiem wystarczy.
 - **Testowanie mutacyjne.** Najtańszy sposób odpowiedzenia na pytanie „czy
-  ten test w ogóle coś chroni". Przy przeglądzie wyszło, że jeden test
-  regresyjny przechodził po **całkowitym usunięciu** sprawdzanej bramki —
-  bo ograniczenie wymuszał w tym scenariuszu inny mechanizm. Procedura:
-  wycofaj poprawkę w kopii repo, uruchom jej test, sprawdź, czy czerwieni.
-  Warto to zautomatyzować (`mutmut`, `cosmic-ray`) choćby dla `pynmap/`.
+  ten test w ogóle coś chroni". Procedura: wycofaj poprawkę w kopii repo,
+  uruchom jej test, sprawdź, czy czerwieni. Warto to zautomatyzować
+  (`mutmut`, `cosmic-ray`) choćby dla `pynmap/`.
+
+  Opłaciło się natychmiast — przy dwóch przeglądach wyłapało **pięć**
+  bezwartościowych testów, których zielona suita nie odróżniała od
+  działających:
+
+  | Test | Dlaczego nic nie chronił |
+  |---|---|
+  | bramka grupowego cwnd | przy jednym hoście limit wymuszało okno per-host |
+  | próg bramki | asercja powtarzała **błędną** formułę z kodu (`cwnd + low_cwnd`) |
+  | domyślna liczba portów | porównanie stałej z samą sobą |
+  | wyczerpanie deskryptorów | `state is not UNKNOWN` jest zawsze prawdą (domyślny stan to `filtered`) |
+  | nieczytelny `--services` | sprawdzał tylko typ wyjątku, nie który plik zawiódł |
+
+  Wniosek praktyczny: asercja nie może powtarzać wyrażenia z kodu
+  produkcyjnego — musi wyrażać **kontrakt**, inaczej mutant przechodzi.
 
 ### Jakość kodu
 

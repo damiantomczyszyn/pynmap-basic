@@ -231,7 +231,7 @@ class SynScanner:
                 # tempo ograniczało wyłącznie okno per-host. W -sT ta
                 # bramka jest od początku — teraz oba silniki działają
                 # tak samo.
-                if len(self._outstanding) >= int(self.group_timing.cwnd) + self.perf.low_cwnd:
+                if len(self._outstanding) >= int(self.group_timing.cwnd):
                     return
                 if host.timed_out or not host.send_ok(now):
                     continue
@@ -337,6 +337,20 @@ class SynScanner:
             return
 
         host, probe = entry
+
+        # Na loopbacku NASZ WŁASNY SYN wraca na surowy socket jako pakiet
+        # przychodzący. Gdy skanowany port równa się portowi źródłowemu
+        # (np. -g 9 -p 9), to sport == dport == source_port, więc pakiet
+        # przechodzi filtr po portach; a goły SYN nie ma flagi ACK, więc
+        # omija też walidację ACK == ISN+1 poniżej i wpada w gałąź
+        # "SYN bez ACK" jako syn-ack. Efekt: zamknięty port raportowany
+        # jako OPEN. Nasza sonda rozpoznaje się po własnym ISN.
+        if (
+            probe.seq is not None
+            and tcp.seq == probe.seq
+            and not (tcp.flags & TcpFlags.ACK)
+        ):
+            return
 
         # Walidacja: ACK musi potwierdzać nasz ISN+1 (nmap robi to samo).
         # Surowy socket odbiera cały ruch TCP wchodzący na maszynę, więc bez

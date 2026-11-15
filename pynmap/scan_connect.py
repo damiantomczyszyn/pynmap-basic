@@ -70,6 +70,11 @@ if hasattr(errno, "ENONET"):
 # EWOULDBLOCK == EAGAIN na Linuksie, ale nie wszędzie
 _ERRNO_MAP.setdefault(errno.EWOULDBLOCK, (PortState.OPEN, Reason.CONACCEPT))
 
+# Ile razy pod rząd tolerujemy porażkę socket() przy pustym zbiorze sond
+# w locie, zanim uznamy host za nieskanowalny. Bez takiego limitu nie ma
+# nikogo, kto zwolniłby deskryptor, więc kolejne próby to pętla bez postępu.
+_FD_FAILURE_LIMIT = 3
+
 _IN_PROGRESS = {errno.EINPROGRESS, errno.EALREADY}
 if hasattr(errno, "EWOULDBLOCK"):
     _IN_PROGRESS.add(errno.EWOULDBLOCK)
@@ -98,6 +103,9 @@ class ConnectScanner:
         self.opts = opts
         self.perf = perf or opts.build_perf()
         self.max_sockets = max_sockets_allowed()
+        # ile razy pod rząd socket() zawiódł, nie mając ani jednej sondy
+        # w locie, która mogłaby zwolnić deskryptor
+        self._fd_failures = 0
         self.group_timing = UltraTimingVals.init_for(self.perf, group=True)
         self._selector = selectors.DefaultSelector()
         # fd -> (HostScanStats, Probe)
@@ -161,7 +169,12 @@ class ConnectScanner:
                 # dwie bramy: limit deskryptorów i grupowe okno zatłoczenia
                 if len(self._pending) >= self.max_sockets:
                     return
-                if len(self._pending) >= int(self.group_timing.cwnd) + self.perf.low_cwnd:
+                # int(cwnd), a NIE cwnd + low_cwnd: przy max_parallelism = 1
+                # (tak ustawiają -T0, -T1, -T2 oraz jawne --max-parallelism 1)
+                # cwnd i low_cwnd są równe 1, więc stary warunek przepuszczał
+                # DWIE sondy naraz — czyli dwukrotność tempa, o które prosi
+                # szablon wybierany właśnie po to, żeby być cichym.
+                if len(self._pending) >= int(self.group_timing.cwnd):
                     return
                 if not host.send_ok(now):
                     continue
@@ -184,7 +197,22 @@ class ConnectScanner:
             if exc.errno in (errno.EMFILE, errno.ENFILE):
                 # brak deskryptorów — port wraca do kolejki, spróbujemy później
                 host.ports_todo.appendleft(port)
-                self.max_sockets = max(8, len(self._pending))
+                # Podłoga 8 była błędem: gdy realna pojemność jest MNIEJSZA
+                # niż 8, max_sockets zostawało na 8, len(_pending) nigdy go
+                # nie dobijało, więc żadna bramka nie blokowała wysyłki
+                # i pętla kręciła się bez końca na 100% CPU (ulimit -n 10
+                # wystarczał, żeby skan nigdy się nie skończył).
+                self.max_sockets = max(1, min(self.max_sockets, len(self._pending)))
+                if self._pending:
+                    # są sondy w locie — zwolnią deskryptor, warto poczekać
+                    return
+                self._fd_failures += 1
+                if self._fd_failures >= _FD_FAILURE_LIMIT:
+                    self._skip_host(
+                        host,
+                        "brak wolnych deskryptorów: "
+                        f"{exc.strerror or exc} (zwiększ ulimit -n)",
+                    )
                 return
             # Cokolwiek innego dotyczy całego hosta, nie jednego portu:
             # typowy przypadek to EAFNOSUPPORT na maszynie z wyłączonym
@@ -197,6 +225,7 @@ class ConnectScanner:
             )
             return
 
+        self._fd_failures = 0
         sock.setblocking(False)
         self._configure_socket(sock, host)
 

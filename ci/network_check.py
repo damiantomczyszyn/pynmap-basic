@@ -197,14 +197,21 @@ def main() -> int:
     all_failures: list[str] = []
 
     for label in scans:
+        # Skan podany przez --scan jest ZAMOWIONY. Pominiecie go po cichu
+        # oznaczalo, ze polowa testu sieciowego cicho znika, a build i tak
+        # swieci na zielono — czyli test, ktory nie potrafi oblac.
         if label == "sS" and not is_root():
-            print(f"network_check: pomijam -{label} (brak CAP_NET_RAW)")
+            msg = f"[{label}] brak CAP_NET_RAW — zamówiony skan nie wykonał się"
+            print(f"network_check: {msg}", file=sys.stderr)
+            all_failures.append(msg)
             continue
         print(f"network_check: uruchamiam -{label} …")
         try:
             result, failures = run_scan(label, dict(expectations))
         except RawSocketError as exc:
-            print(f"network_check: -{label} niedostępny: {exc}", file=sys.stderr)
+            msg = f"[{label}] surowe sockety niedostępne: {exc}"
+            print(f"network_check: {msg}", file=sys.stderr)
+            all_failures.append(msg)
             continue
         results.append(result)
         all_failures += failures

@@ -439,3 +439,100 @@ def test_host_timeout_end_to_end_never_invents_states(listener):
         assert len(results) <= report.probes_sent
     else:
         assert len(results) == len(ports)
+
+
+# ---------------------------------------------------------------------------
+# Trwaly brak deskryptorow: skan musi sie SKONCZYC, a nie krecic
+# ---------------------------------------------------------------------------
+
+
+def test_persistent_fd_exhaustion_skips_host_instead_of_spinning(monkeypatch):
+    """
+    Gdy socket() zawodzi ZA KAZDYM razem i nie ma ani jednej sondy w locie,
+    nikt nie zwolni deskryptora — kolejne proby to petla bez postepu.
+    Stara wersja ustawiala max_sockets = max(8, len(_pending)); gdy realna
+    pojemnosc byla mniejsza niz 8, zadna bramka nie blokowala wysylki
+    i skan krecil sie bez konca na 100% CPU (ulimit -n 10 wystarczal).
+
+    Test celuje w maszyne stanow, a nie w czas: nie uruchamia skanu do konca,
+    wiec nie moze zawisnac, jesli poprawka zniknie.
+    """
+    opts = ScanOptions(
+        ports=[80, 443],
+        timing=TIMING_TEMPLATES[4],
+        randomize_ports=False,
+        resolve_dns=False,
+    )
+    perf = opts.build_perf()
+    scanner = ConnectScanner(opts, perf)
+    host = HostScanStats(Target(ip="192.0.2.1"), opts, perf, now=time.monotonic())
+
+    def always_emfile(*_a, **_kw):
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr(socket, "socket", always_emfile)
+
+    from pynmap.scan_connect import _FD_FAILURE_LIMIT
+
+    now = time.monotonic()
+    for _ in range(_FD_FAILURE_LIMIT):
+        assert host.skip_reason is None
+        scanner._launch_probe(host, 80, now)
+
+    assert host.skip_reason is not None, (
+        "trwaly brak deskryptorow nie konczy hosta -> petla bez postepu"
+    )
+    assert "deskryptor" in host.skip_reason
+    assert host.completed(), "kolejki niewyczyszczone, petla glowna sie nie skonczy"
+
+
+def test_fd_exhaustion_does_not_keep_a_floor_above_real_capacity(monkeypatch):
+    """
+    max_sockets nie moze zostac na wartosci WYZSZEJ niz realna pojemnosc,
+    bo wtedy bramka deskryptorow nigdy nie blokuje wysylki.
+    """
+    opts = ScanOptions(
+        ports=[80],
+        timing=TIMING_TEMPLATES[4],
+        randomize_ports=False,
+        resolve_dns=False,
+    )
+    perf = opts.build_perf()
+    scanner = ConnectScanner(opts, perf)
+    host = HostScanStats(Target(ip="192.0.2.1"), opts, perf, now=time.monotonic())
+
+    def always_enfile(*_a, **_kw):
+        raise OSError(errno.ENFILE, "File table overflow")
+
+    monkeypatch.setattr(socket, "socket", always_enfile)
+    scanner._launch_probe(host, 80, time.monotonic())
+
+    assert not scanner._pending
+    assert scanner.max_sockets <= 1, (
+        f"max_sockets = {scanner.max_sockets} przy zerowej pojemnosci"
+    )
+
+
+def test_single_fd_failure_still_only_requeues(monkeypatch):
+    """Kontrola: JEDNA porazka to chwila, nie wyrok na hosta."""
+    real_socket = socket.socket
+    calls = {"n": 0}
+
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_socket(*a, **kw)
+
+    monkeypatch.setattr(socket, "socket", flaky)
+    opts = ScanOptions(
+        ports=[80],
+        timing=TIMING_TEMPLATES[4],
+        randomize_ports=False,
+        resolve_dns=False,
+        max_retries=0,
+    )
+    report = connect_scan([Target(ip="127.0.0.1")], opts)[0]
+    assert report.skip_reason is None
+    assert report.host_up is True
+    assert 80 in report.portlist.results

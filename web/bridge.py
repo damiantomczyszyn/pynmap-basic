@@ -187,11 +187,19 @@ def rtt_trace(samples_ms: list[float], template: int = 3) -> dict:
         except (TypeError, ValueError):
             continue
 
-        before = to.timeout
+        # "Odrzucona" znaczy: adjust() nie zmienil ANI estymaty, ANI timeoutu.
+        # Warunek `to.srtt == -1` byl spelniony tylko dopoki estymator nie
+        # przyjal jeszcze zadnej probki, wiec kazde pozniejsze odrzucenie
+        # (delta < -50 ms, delta >= 8 s, sanity check #2) bylo pokazywane
+        # jako probka WLICZONA do estymaty.
+        before_timeout = to.timeout
+        before_srtt = to.srtt
+        before_rttvar = to.rttvar
         to.adjust(sample_us)
         ignored = (
-            to.timeout == before
-            and to.srtt == -1
+            to.timeout == before_timeout
+            and to.srtt == before_srtt
+            and to.rttvar == before_rttvar
         )
 
         steps.append(

@@ -199,3 +199,47 @@ def test_everything_is_json_serializable():
         "env": bridge.environment(),
     }
     assert json.loads(json.dumps(payload)) == payload
+
+
+# ---------------------------------------------------------------------------
+# rtt_trace: flaga "ignored" musi oznaczac faktycznie odrzucone probki
+# ---------------------------------------------------------------------------
+
+
+def test_rtt_trace_marks_rejected_samples_as_ignored():
+    """
+    Warunek `to.srtt == -1` byl prawdziwy tylko DOPOKI estymator nie przyjal
+    jeszcze zadnej probki, wiec kazde pozniejsze odrzucenie przez adjust()
+    bylo pokazywane jako probka wliczona do estymaty. adjust() ma trzy
+    sciezki odrzucenia: delta < -50 ms, delta >= 8 s oraz sanity check #2.
+    """
+    steps = bridge.rtt_trace(samples_ms=[10, 9000, 12], template=3)["steps"]
+    flags = [s["ignored"] for s in steps]
+    assert flags == [False, True, False], flags
+
+
+def test_rtt_trace_marks_negative_sample_as_ignored():
+    steps = bridge.rtt_trace(samples_ms=[10, -100], template=3)["steps"]
+    assert [s["ignored"] for s in steps] == [False, True]
+
+
+def test_rtt_trace_sanity_check_sample_is_ignored():
+    """Skok absurdalnie wiekszy od estymaty (sanity check #2 z timing.cc)."""
+    steps = bridge.rtt_trace(samples_ms=[10, 2000], template=3)["steps"]
+    assert steps[1]["ignored"] is True
+
+
+def test_rtt_trace_accepts_plausible_samples():
+    steps = bridge.rtt_trace(samples_ms=[10, 11, 12, 13], template=3)["steps"]
+    assert all(s["ignored"] is False for s in steps)
+
+
+def test_rtt_trace_ignored_means_estimator_unchanged():
+    """Niezmiennik: ignored == True dokladnie wtedy, gdy nic sie nie zmienilo."""
+    steps = bridge.rtt_trace(samples_ms=[10, 9000, 12, 2000, 13], template=3)["steps"]
+    prev = None
+    for s in steps:
+        cur = (s["srtt_ms"], s["rttvar_ms"], s["timeout_ms"])
+        if prev is not None:
+            assert s["ignored"] == (cur == prev), s
+        prev = cur

@@ -10,6 +10,7 @@ Flagi nazwane tak jak w nmapie, żeby dało się przełożyć polecenie 1:1:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import re
 import shlex
 import sys
@@ -21,7 +22,7 @@ from .output import VERSION, format_grepable, format_json, format_normal
 from .ports import PortSpecError, parse_port_spec
 from .scan_connect import connect_scan
 from .scan_syn import RawSocketError, syn_scan
-from .services import ServiceDB
+from .services import ServiceDB, ServiceDBError
 from .targets import TargetSpecError, expand_specs, reverse_lookup
 from .timing import TIMING_TEMPLATES
 
@@ -41,6 +42,47 @@ def parse_time(value: str) -> float:
     unit = (match.group(2) or "s").lower()
     factors = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
     return amount * factors[unit]
+
+
+def _bounded_int(name: str, low: int, high: int):
+    """
+    Fabryka walidatora dla wartości, które trafiają PROSTO do pola nagłówka.
+
+    Bez tego --ttl 999, --ttl -1 i -g 99999 kończyły skan niezłapanym
+    struct.error ("'B' format requires 0 <= number <= 255") w środku
+    budowania pakietu, czyli tracebackiem zamiast komunikatu.
+    """
+
+    def parse(value: str) -> int:
+        try:
+            number = int(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"'{value}' nie jest liczbą całkowitą"
+            ) from exc
+        if not low <= number <= high:
+            raise argparse.ArgumentTypeError(
+                f"{name} musi być w zakresie {low}-{high}, otrzymano {number}"
+            )
+        return number
+
+    return parse
+
+
+def _ip_literal(value: str) -> str:
+    """
+    -S musi być literalnym adresem IP.
+
+    Nazwa hosta albo literówka kończyła skan niezłapanym
+    OSError("illegal IP address string passed to inet_aton").
+    """
+    try:
+        ipaddress.ip_address(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"'{value}' nie jest adresem IP (-S wymaga literału, nie nazwy)"
+        ) from exc
+    return value
 
 
 def _positive_int(value: str) -> int:
@@ -144,12 +186,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="ziarno losowania kolejności portów (powtarzalne testy)")
 
     raw = parser.add_argument_group("parametry pakietów (dotyczą -sS)")
-    raw.add_argument("-g", "--source-port", type=int, metavar="PORT",
-                     help="wymuś port źródłowy")
-    raw.add_argument("-S", "--source-ip", metavar="IP",
+    raw.add_argument("-g", "--source-port",
+                     type=_bounded_int("-g/--source-port", 0, 65535), metavar="PORT",
+                     help="wymuś port źródłowy (0 = losowy)")
+    raw.add_argument("-S", "--source-ip", type=_ip_literal, metavar="IP",
                      help="wymuś adres źródłowy")
-    raw.add_argument("--ttl", type=int, default=64, metavar="N",
-                     help="TTL w wysyłanych pakietach (domyślnie 64)")
+    raw.add_argument("--ttl", type=_bounded_int("--ttl", 1, 255), default=64,
+                     metavar="N", help="TTL w wysyłanych pakietach (domyślnie 64)")
 
     out = parser.add_argument_group("wyjście")
     out.add_argument("--open", dest="only_open", action="store_true",
@@ -224,7 +267,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    services = ServiceDB(services_path=args.services)
+    try:
+        services = ServiceDB(services_path=args.services)
+    except ServiceDBError as exc:
+        print(f"pynmap: {exc}", file=sys.stderr)
+        return 2
 
     try:
         ports = resolve_ports(args, services)
@@ -307,13 +354,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(text)
 
-    for path, formatter in (
-        (args.out_normal, lambda: text),
-        (args.out_grepable, lambda: format_grepable(report, services)),
-        (args.out_json, lambda: format_json(report, services)),
+    for flag, path, formatter in (
+        ("-oN", args.out_normal, lambda: text),
+        ("-oG", args.out_grepable, lambda: format_grepable(report, services)),
+        ("-oJ", args.out_json, lambda: format_json(report, services)),
     ):
-        if not path:
+        if path is None:
             continue
+        if not path.strip():
+            # `-oJ ""` (np. z nierozwiniętej zmiennej) było traktowane jak
+            # brak flagi: skan się wykonywał, raport przepadał, kod wyjścia 0.
+            print(f"pynmap: {flag} wymaga niepustej ścieżki", file=sys.stderr)
+            return 2
         try:
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(formatter())

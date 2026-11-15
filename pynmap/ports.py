@@ -49,6 +49,12 @@ def parse_port_spec(spec: str, service_lookup=None) -> list[int]:
 
     ports: set[int] = set()
 
+    # Prefiks protokołu jest w nmapie "lepki": w -p U:53,161 OBA porty są UDP,
+    # a nie tylko pierwszy. Trzymanie go per-element oznaczało, że 'U:53,80'
+    # cicho skanowało TCP/80 — czyli użytkownik prosił o UDP, a dostawał
+    # skan TCP jednego z podanych portów.
+    current_proto = "T"
+
     for raw in spec.split(","):
         chunk = raw.strip()
         if not chunk:
@@ -57,14 +63,16 @@ def parse_port_spec(spec: str, service_lookup=None) -> list[int]:
         # Prefiksy protokołów: T: (tcp), U: (udp), S: (sctp), P: (ip proto)
         if len(chunk) > 1 and chunk[1] == ":":
             proto = chunk[0].upper()
-            chunk = chunk[2:]
-            if proto in ("U", "S", "P"):
-                # pynmap-basic skanuje tylko TCP — pomijamy, jak nmap bez -sU
-                continue
-            if proto != "T":
+            if proto not in ("T", "U", "S", "P"):
                 raise PortSpecError(f"Nieznany prefiks protokołu: {proto}:")
+            current_proto = proto
+            chunk = chunk[2:]
             if not chunk:
                 continue
+
+        if current_proto != "T":
+            # pynmap-basic skanuje tylko TCP — pomijamy, jak nmap bez -sU
+            continue
 
         if chunk.startswith("-") and chunk != "-":
             # '-1024' => 1-1024
@@ -76,6 +84,11 @@ def parse_port_spec(spec: str, service_lookup=None) -> list[int]:
             ports.update(range(lo, MAX_PORT + 1))
         elif chunk == "-":
             ports.update(range(MIN_PORT, MAX_PORT + 1))
+        elif "-" in chunk and _lookup(chunk, service_lookup) is not None:
+            # 'http-proxy', 'https-alt', 'ms-wbt-server' — myślnik w nazwie
+            # usługi trafiał w gałąź zakresu i rozbijał nazwę na pół,
+            # więc nazwy, które SĄ w bazie, były nieosiągalne przez -p.
+            ports.add(_lookup(chunk, service_lookup))
         elif "-" in chunk:
             lo_s, _, hi_s = chunk.partition("-")
             lo = _parse_single(lo_s, service_lookup)
@@ -92,6 +105,16 @@ def parse_port_spec(spec: str, service_lookup=None) -> list[int]:
     return sorted(ports)
 
 
+def _lookup(name: str, service_lookup=None) -> int | None:
+    """Nazwa usługi -> port, albo None. Nie rzuca."""
+    if service_lookup is None:
+        return None
+    try:
+        return service_lookup(name.strip())
+    except Exception:  # noqa: BLE001 - baza usług nie może wywrócić parsera
+        return None
+
+
 def _parse_single(text: str, service_lookup=None) -> int:
     text = text.strip()
     if not text:
@@ -106,6 +129,13 @@ def _parse_single(text: str, service_lookup=None) -> int:
     if service_lookup is not None:
         port = service_lookup(text)
         if port is not None:
+            # Baza usług może pochodzić z pliku podanego przez użytkownika
+            # (--services), więc jej zawartość jest wejściem jak każde inne.
+            if not MIN_PORT <= port <= MAX_PORT:
+                raise PortSpecError(
+                    f"usługa '{text}' wskazuje port poza zakresem "
+                    f"{MIN_PORT}-{MAX_PORT}: {port}"
+                )
             return port
 
     raise PortSpecError(f"'{text}' nie jest numerem portu ani znaną usługą")

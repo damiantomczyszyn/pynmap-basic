@@ -51,6 +51,11 @@ jobs:
 
       - name: Build wersji C (-Wall -Wextra -Wpedantic)
         run: |
+          # pipefail jest konieczny: domyslna powloka to 'bash -e' BEZ pipefail,
+          # wiec kod wyjscia potoku to kod `tee`, czyli zawsze 0 — nieudana
+          # kompilacja przechodzila, o ile tylko komunikat nie zawieral slowa
+          # "warning" ani "error", ktore wylapuje grep ponizej.
+          set -o pipefail
           make -C c_reference clean
           make -C c_reference 2>&1 | tee /tmp/build.log
           if grep -qiE "warning|error" /tmp/build.log; then
@@ -232,7 +237,13 @@ jobs:
   pages:
     name: Publikacja na GitHub Pages
     needs: [test, network, page]
-    if: ${{ always() && needs.test.result == 'success' && needs.page.result == 'success' && github.ref == 'refs/heads/main' }}
+    # needs.network.result jest sprawdzany CELOWO: job `network` weryfikuje,
+    # ze skaner zwraca prawidlowe stany portow na prawdziwym ruchu. Bez tego
+    # warunku strona publikowala sie, mimo ze realny skan wykryl rozbieznosc —
+    # a naglowek tego joba obiecuje, ze publiczny URL odpowiada PRZETESTOWANEMU
+    # commitowi. Samo BRAK artefaktu nadal nie blokuje publikacji (krok
+    # download ma continue-on-error) — to inna sytuacja niz oblany skan.
+    if: ${{ always() && needs.test.result == 'success' && needs.page.result == 'success' && needs.network.result == 'success' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
 
     permissions:

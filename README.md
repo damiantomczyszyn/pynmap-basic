@@ -141,6 +141,7 @@ sudo python3 -m pynmap -sS -g 53 -p 1-100 192.168.1.10
 | `--host-timeout CZAS` | np. `30s`, `5m` |
 | `--scan-delay CZAS` | minimalna przerwa między sondami |
 | `-g PORT` / `-S IP` | wymuszony port / adres źródłowy (`-sS`) |
+| `--services PLIK` | własna baza `nmap-services` (błąd, jeśli nieczytelna) |
 | `-oN` / `-oG` / `-oJ` | zapis: normal / grepable / JSON |
 
 Pełna lista: `python3 -m pynmap --help`.
@@ -189,7 +190,7 @@ docs/
   port-states.md         tablice decyzyjne errno/flagi -> stan portu
   rozszerzenia.md        plan dojścia do nmapa: tryby, fazy, koszty
 
-tests/                   228 testów (pytest)
+tests/                   291 testów (pytest)
 ```
 
 ---
@@ -232,7 +233,7 @@ pip install pytest
 python3 -m pytest tests/ -v
 ```
 
-228 testów. Pokrywają m.in.:
+291 testów. Pokrywają m.in.:
 
 - zgodność estymatora RTT z wzorami z `timing.cc` (łącznie z zachowaniem
   przesunięć bitowych na liczbach ujemnych),
@@ -254,7 +255,14 @@ python3 -m pytest tests/ -v
 - że `--host-timeout` nie dopisuje wymyślonych stanów portom, do których
   nie poszła żadna sonda,
 - że grupowe okno zatłoczenia faktycznie rośnie, a nie stoi na wartości
-  początkowej.
+  początkowej,
+- że prefiks protokołu w `-p` jest „lepki" (`U:53,80` to dwa porty UDP, jak
+  w nmapie, a nie skan TCP/80),
+- że własna sonda SYN wrócona po loopbacku nie jest liczona jako odpowiedź
+  (`-g 9 -p 9` na zamkniętym porcie nie może dać `open`),
+- że trwały brak deskryptorów kończy hosta, a nie zapętla skan,
+- że wartości idące do pól nagłówka (`--ttl`, `-g`, `-S`) są walidowane,
+  zamiast kończyć skan tracebackiem.
 
 Testy SYN scanu wymagające `CAP_NET_RAW` są automatycznie pomijane bez
 uprawnień, więc `pytest` przechodzi też na zwykłym koncie.
